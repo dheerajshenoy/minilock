@@ -1,55 +1,5 @@
-#define _GNU_SOURCE
-#include "ext-session-lock-v1-client-protocol.h"
-
-#include <fcntl.h>
-#include <poll.h>
-#include <pwd.h>
-#include <security/pam_appl.h>
-#include <stdbool.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/mman.h>
-#include <time.h>
-#include <unistd.h>
-#include <wayland-client.h>
-#include <xkbcommon/xkbcommon.h>
-
-#define STR_(x) #x
-#define STR(x) STR_(x)
-
-struct state; /* forward declaration */
-
-struct output
-{
-    struct wl_output *wl_output;
-    uint32_t name;
-    struct output *next;
-    struct state *state;
-    struct wl_surface *surface;
-    struct ext_session_lock_surface_v1 *lock_surface;
-};
-
-struct state
-{
-    struct wl_display *display;
-    struct wl_registry *registry;
-    struct wl_compositor *compositor;
-    struct wl_shm *shm;
-    struct wl_seat *seat;
-    struct ext_session_lock_manager_v1 *lock_manager;
-    struct output *outputs;
-    struct ext_session_lock_v1 *lock;
-    bool locked, finished;
-    struct wl_keyboard *keyboard;
-    struct xkb_context *xkb_ctx;
-    struct xkb_keymap *xkb_keymap;
-    struct xkb_state *xkb_state;
-    char password[256];
-    size_t pw_len;
-    bool authenticated;
-};
+#include "minilock.h"
+#include "decoder.h"
 
 // Registry listener callbacks when a global object is added or removed
 static void
@@ -230,8 +180,6 @@ kb_keymap(void *data, struct wl_keyboard *kb, uint32_t format, int fd,
                                      XKB_KEYMAP_COMPILE_NO_FLAGS);
     munmap(map, size);
     s->xkb_state = xkb_state_new(s->xkb_keymap);
-
-    fprintf(stderr, "keymap received\n");
 }
 
 static void
@@ -262,10 +210,6 @@ kb_key(void *data, struct wl_keyboard *kb, uint32_t serial, uint32_t time,
     if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter)
     {
         s->password[s->pw_len] = '\0';
-        fprintf(stderr, "bytes:");
-        for (size_t i = 0; i < s->pw_len; i++)
-            fprintf(stderr, " %02x", (unsigned char)s->password[i]);
-        fprintf(stderr, "\n");
         if (check_password(s->password))
             s->authenticated = true;
         else
@@ -323,10 +267,28 @@ static const struct wl_keyboard_listener keyboard_listener = {
     .repeat_info = kb_repeat_info,
 };
 
+static bool
+load_image(struct state *s, const char *path)
+{
+#ifdef HAVE_PNG
+    if (load_png(path, &s->img_px, &s->img_w, &s->img_h))
+        return true;
+#endif
+    fprintf(stderr, "Cannot load image (unsupported or invalid): %s\n", path);
+    return false;
+}
+
 int
-main()
+main(int argc, char *argv[])
 {
     struct state state = {0};
+
+    if (argc > 1)
+    {
+        if (!load_image(&state, argv[1]))
+            return 1;
+        printf("Loaded image: %dx%d\n", state.img_w, state.img_h);
+    }
 
     state.display = wl_display_connect(NULL);
     if (!state.display)
