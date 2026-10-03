@@ -11,7 +11,7 @@ flatten_alpha(struct image *img)
 {
     const uint32_t bg = 0x1E1E2E;
     uint32_t *px      = img->data;
-    for (size_t i = 0; i < (size_t)img->width * img->height; i++)
+    for (size_t i = 0; i < (size_t)img->w * img->h; i++)
     {
         uint32_t a = px[i] >> 24, out = 0;
         for (int sh = 0; sh <= 16; sh += 8)
@@ -72,12 +72,12 @@ load_jpeg(const char *path, struct image *img)
     cinfo.out_color_space = JCS_RGB; /* also converts grayscale/CMYK */
     (void)jpeg_start_decompress(&cinfo);
 
-    img->width  = cinfo.output_width;
-    img->height = cinfo.output_height;
-    img->stride = img->width * 4; /* XRGB8888, native-endian */
+    img->w  = cinfo.output_width;
+    img->h = cinfo.output_height;
+    img->stride = img->w * 4; /* XRGB8888, native-endian */
 
-    img->data = malloc((size_t)img->stride * img->height);
-    JSAMPROW row = malloc((size_t)img->width * 3);
+    img->data = malloc((size_t)img->stride * img->h);
+    JSAMPROW row = malloc((size_t)img->w * 3);
 
     if (!img->data || !row)
     {
@@ -96,7 +96,7 @@ load_jpeg(const char *path, struct image *img)
             = (uint32_t *)((char *)img->data
                            + (size_t)cinfo.output_scanline * img->stride);
         (void)jpeg_read_scanlines(&cinfo, &row, 1);
-        for (uint32_t x = 0; x < img->width; x++)
+        for (uint32_t x = 0; x < img->w; x++)
             dst[x] = 0xFF000000u | (uint32_t)row[x * 3] << 16
                      | (uint32_t)row[x * 3 + 1] << 8 | row[x * 3 + 2];
     }
@@ -125,10 +125,10 @@ load_png(const char *path, struct image *img)
 
     /* BGRA bytes == 0xAARRGGBB as a little-endian uint32. */
     png.format  = PNG_FORMAT_BGRA;
-    img->width  = png.width;
-    img->height = png.height;
+    img->w  = png.width;
+    img->h = png.height;
     img->stride = png.width * 4;
-    img->data   = malloc((size_t)img->stride * img->height);
+    img->data   = malloc((size_t)img->stride * img->h);
     if (!img->data)
     {
         fprintf(stderr, "Failed to allocate memory for image\n");
@@ -183,8 +183,8 @@ load_webp(const char *path, struct image *img)
         return false;
     }
 
-    img->width  = w;
-    img->height = h;
+    img->w  = w;
+    img->h = h;
     img->stride = (uint32_t)w * 4;
     img->data   = malloc((size_t)img->stride * h);
     if (!img->data)
@@ -226,8 +226,8 @@ load_tiff(const char *path, struct image *img)
     TIFFGetField(tif, TIFFTAG_IMAGEWIDTH, &w);
     TIFFGetField(tif, TIFFTAG_IMAGELENGTH, &h);
 
-    img->width  = w;
-    img->height = h;
+    img->w  = w;
+    img->h = h;
     img->stride = w * 4;
     img->data   = w && h ? malloc((size_t)img->stride * h) : NULL;
     if (!img->data)
@@ -292,8 +292,8 @@ load_svg(const char *path, struct image *img)
         return false;
     }
 
-    img->width  = w;
-    img->height = h;
+    img->w  = w;
+    img->h = h;
     img->stride = (uint32_t)w * 4;
     img->data   = calloc(h, img->stride);
     if (!img->data)
@@ -356,8 +356,8 @@ load_avif(const char *path, struct image *img)
         return false;
     }
 
-    img->width  = w;
-    img->height = h;
+    img->w  = w;
+    img->h = h;
     img->stride = w * 4;
     img->data   = malloc((size_t)img->stride * h);
     if (!img->data)
@@ -421,8 +421,8 @@ load_heif(const char *path, struct image *img)
         goto out;
     }
 
-    img->width  = w;
-    img->height = h;
+    img->w  = w;
+    img->h = h;
     img->stride = (uint32_t)w * 4;
     img->data   = malloc((size_t)img->stride * h);
     if (!img->data)
@@ -561,8 +561,8 @@ load_bmp(const char *path, struct image *img)
         goto out;
     }
 
-    img->width  = w;
-    img->height = h;
+    img->w  = w;
+    img->h = h;
     img->stride = w * 4;
     img->data   = malloc((size_t)img->stride * h);
     if (!img->data)

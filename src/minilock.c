@@ -127,10 +127,10 @@ static const struct wl_buffer_listener buffer_listener = {
 };
 
 static struct wl_buffer *
-create_buffer(struct state *s, uint32_t width, uint32_t height)
+create_buffer(struct state *s, uint32_t w, uint32_t h)
 {
-    int stride = width * 4;
-    int size   = stride * height;
+    int stride = w * 4;
+    int size   = stride * h;
 
     int fd = memfd_create(PROJECT_NAME "-buf", 0);
     if (fd < 0 || ftruncate(fd, size) < 0)
@@ -147,35 +147,35 @@ create_buffer(struct state *s, uint32_t width, uint32_t height)
     }
 
     const struct image *img = s->img;
-    if (img && img->data && img->width && img->height)
+    if (img && img->data && img->w && img->h)
     {
         /* Scale to cover the output, centered, nearest-neighbour. */
-        uint64_t sw = width, sh = height;
-        bool wide   = sw * img->height > sh * img->width;
-        uint64_t dw = wide ? sw : (sh * img->width + img->height - 1) / img->height;
-        uint64_t dh = wide ? (sw * img->height + img->width - 1) / img->width : sh;
-        int64_t ox  = ((int64_t)dw - (int64_t)width) / 2;
-        int64_t oy  = ((int64_t)dh - (int64_t)height) / 2;
+        uint64_t sw = w, sh = h;
+        bool wide   = sw * img->h > sh * img->w;
+        uint64_t dw = wide ? sw : (sh * img->w + img->h - 1) / img->h;
+        uint64_t dh = wide ? (sw * img->h + img->w - 1) / img->w : sh;
+        int64_t ox  = ((int64_t)dw - (int64_t)w) / 2;
+        int64_t oy  = ((int64_t)dh - (int64_t)h) / 2;
 
-        for (uint32_t y = 0; y < height; y++)
+        for (uint32_t y = 0; y < h; y++)
         {
-            uint64_t sy = (uint64_t)(y + oy) * img->height / dh;
-            if (sy >= img->height)
-                sy = img->height - 1;
+            uint64_t sy = (uint64_t)(y + oy) * img->h / dh;
+            if (sy >= img->h)
+                sy = img->h - 1;
             const uint32_t *src
                 = (const uint32_t *)((const char *)img->data + sy * img->stride);
-            for (uint32_t x = 0; x < width; x++)
+            for (uint32_t x = 0; x < w; x++)
             {
-                uint64_t sx = (uint64_t)(x + ox) * img->width / dw;
-                if (sx >= img->width)
-                    sx = img->width - 1;
-                px[(size_t)y * width + x] = src[sx];
+                uint64_t sx = (uint64_t)(x + ox) * img->w / dw;
+                if (sx >= img->w)
+                    sx = img->w - 1;
+                px[(size_t)y * w + x] = src[sx];
             }
         }
     }
     else
     {
-        for (uint32_t i = 0; i < width * height; i++)
+        for (uint32_t i = 0; i < w * h; i++)
             px[i] = 0xFF1E1E2E; /* ARGB: opaque dark blue-gray */
     }
 
@@ -183,7 +183,7 @@ create_buffer(struct state *s, uint32_t width, uint32_t height)
 
     struct wl_shm_pool *pool = wl_shm_create_pool(s->shm, fd, size);
     struct wl_buffer *buf    = wl_shm_pool_create_buffer(
-        pool, 0, width, height, stride, WL_SHM_FORMAT_ARGB8888);
+        pool, 0, w, h, stride, WL_SHM_FORMAT_ARGB8888);
     wl_shm_pool_destroy(pool);
     close(fd);
 
@@ -193,15 +193,15 @@ create_buffer(struct state *s, uint32_t width, uint32_t height)
 
 static void
 surface_configure(void *data, struct ext_session_lock_surface_v1 *ls,
-                  uint32_t serial, uint32_t width, uint32_t height)
+                  uint32_t serial, uint32_t w, uint32_t h)
 {
     struct output *o = data;
 
     ext_session_lock_surface_v1_ack_configure(ls, serial);
 
-    struct wl_buffer *buf = create_buffer(o->state, width, height);
+    struct wl_buffer *buf = create_buffer(o->state, w, h);
     wl_surface_attach(o->surface, buf, 0, 0);
-    wl_surface_damage_buffer(o->surface, 0, 0, width, height);
+    wl_surface_damage_buffer(o->surface, 0, 0, w, h);
     wl_surface_commit(o->surface);
 }
 

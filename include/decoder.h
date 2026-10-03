@@ -6,9 +6,10 @@
 
 struct image
 {
-    uint32_t width, height;
+    uint32_t w, h;
     uint32_t stride;
     void *data;
+    int n_frames;
 };
 
 #ifdef HAVE_JPEG
