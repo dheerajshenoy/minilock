@@ -216,8 +216,9 @@ draw_image(uint32_t *px, uint32_t w, uint32_t h, const struct image *img)
                          : NULL;
     if (!maps)
     {
+        uint32_t fill = CONFIG.color ? CONFIG.color : IMAGE_BG;
         for (size_t i = 0; i < (size_t)w * h; i++)
-            px[i] = IMAGE_BG;
+            px[i] = fill;
         return;
     }
     uint32_t *xmap = maps, *ymap = maps + w;
@@ -717,32 +718,6 @@ toml_error(const char *msg, const char *msg1)
 
 // ---------------- config ----------------
 static bool
-parse_config(const char *path)
-{
-    toml_result_t result = toml_parse_file_ex(path);
-    if (!result.ok)
-    {
-        fprintf(stderr, "Failed to parse config.toml: %s\n", result.errmsg);
-        return false;
-    }
-
-    return true;
-}
-
-static void
-print_usage(FILE *out, const char *progname)
-{
-    fprintf(out,
-            "Usage: %s [options] [image]\n"
-            "Options:\n"
-            "  -h, --help       Show this help message and exit\n"
-            "  -c, --config     Specify a custom config file (default: "
-            "config.toml)\n"
-            "  -v, --version    Show version information and exit\n",
-            progname);
-}
-
-static bool
 parse_color(const char *s, uint32_t *out)
 {
     if (*s == '#')
@@ -755,35 +730,135 @@ parse_color(const char *s, uint32_t *out)
     return true;
 }
 
+/* $XDG_CONFIG_HOME/minilock/config.toml or ~/.config/minilock/config.toml,
+ * or NULL if there is no readable file there. */
+static const char *
+default_config_path(void)
+{
+    static char buf[4096];
+    const char *xdg = getenv("XDG_CONFIG_HOME"), *home = getenv("HOME");
+
+    if (xdg && *xdg)
+        snprintf(buf, sizeof(buf), "%s/minilock/config.toml", xdg);
+    else if (home && *home)
+        snprintf(buf, sizeof(buf), "%s/.config/minilock/config.toml", home);
+    else
+        return NULL;
+    return access(buf, R_OK) == 0 ? buf : NULL;
+}
+
+/* "~/x" -> "$HOME/x" (the shell does this for command-line paths, not TOML). */
+static const char *
+expand_home(const char *path)
+{
+    const char *home = getenv("HOME");
+    if (!path || path[0] != '~' || path[1] != '/' || !home)
+        return path;
+
+    size_t n = strlen(home) + strlen(path);
+    char *out = malloc(n);
+    if (!out)
+        return path;
+    snprintf(out, n, "%s%s", home, path + 1);
+    return out;
+}
+
+/* Fill CONFIG from the TOML file; keys that are absent keep their defaults. */
+static bool
+parse_config(void)
+{
+    if (!CONFIG.path)
+        CONFIG.path = default_config_path();
+    if (!CONFIG.path)
+        return false; /* no config file is fine */
+
+    /* The strings below point into this result, so it is never freed. */
+    toml_result_t result = toml_parse_file_ex(CONFIG.path);
+    if (!result.ok)
+    {
+        toml_error(result.errmsg, 0);
+        return false;
+    }
+
+    typedef struct
+    {
+        const char *key;
+        int type;
+        void *dest;
+    } minilock_toml_entry;
+
+    minilock_toml_entry entries[] = {
+        {"image.bgcolor", TOML_STRING, &CONFIG.image.bgcolor},
+        {"image.path", TOML_STRING, &CONFIG.image.path},
+        {"image.smooth", TOML_BOOLEAN, &CONFIG.image.smooth},
+        {"image.tint", TOML_STRING, &CONFIG.image.tint},
+
+        {"indicator.input.show", TOML_BOOLEAN, &CONFIG.input_indicator.show},
+        {"indicator.input.color", TOML_STRING, &CONFIG.input_indicator.color},
+        {"indicator.input.type", TOML_STRING, &CONFIG.input_indicator.type},
+        {"indicator.input.radius", TOML_INT64, &CONFIG.input_indicator.radius},
+        {0, 0, 0}};
+
+    for (int i = 0; entries[i].key; i++)
+    {
+        toml_datum_t datum = toml_seek(result.toptab, entries[i].key);
+        if (datum.type == TOML_UNKNOWN)
+            continue; /* key not present: keep the default */
+        if (datum.type != entries[i].type)
+            toml_error("Invalid type for key: ", entries[i].key);
+
+        switch (entries[i].type)
+        {
+            case TOML_STRING:
+                *(const char **)entries[i].dest = datum.u.s;
+                break;
+            case TOML_BOOLEAN:
+                *(bool *)entries[i].dest = datum.u.boolean;
+                break;
+            case TOML_INT64:
+                *(int *)entries[i].dest = (int)datum.u.int64;
+                break;
+        }
+    }
+
+    /* image.bgcolor -> the effective background color. */
+    if (CONFIG.image.bgcolor
+        && !parse_color(CONFIG.image.bgcolor, &CONFIG.color))
+        toml_error("Invalid color for image.bgcolor: ", CONFIG.image.bgcolor);
+
+    CONFIG.image.path = expand_home(CONFIG.image.path);
+    return true;
+}
+
+static void
+print_usage(FILE *out, const char *progname)
+{
+    fprintf(out,
+            "Usage: %s [options]\n"
+            "Options:\n"
+            "  -h, --help       Show this help message and exit\n"
+            "  -c, --config     Specify a custom config file (default: "
+            "~/.config/minilock/config.toml)\n"
+            "  -v, --version    Show version information and exit\n",
+            progname);
+}
+
 static void
 parse_args(int argc, char **argv, struct Config *cfg)
 {
     static const struct option longopts[] = {
-        {"image", required_argument, NULL, 'i'},
-        {"color", required_argument, NULL, 'c'},
-        {"config", required_argument, NULL, 'C'},
+        {"config", required_argument, NULL, 'c'},
         {"help", no_argument, NULL, 'h'},
         {"version", no_argument, NULL, 'v'},
         {0, 0, 0, 0},
     };
 
     int c;
-    while ((c = getopt_long(argc, argv, "i:c:C:hv", longopts, NULL)) != -1)
+    while ((c = getopt_long(argc, argv, "c:hv", longopts, NULL)) != -1)
     {
         switch (c)
         {
-            case 'i':
-                cfg->image.path = optarg;
-                break;
             case 'c':
-                if (!parse_color(optarg, &cfg->color))
-                {
-                    fprintf(stderr, "Invalid color: %s (expected rrggbb)\n",
-                            optarg);
-                    exit(1);
-                }
-                break;
-            case 'C':
                 cfg->path = optarg;
                 break;
             case 'h':
@@ -810,16 +885,14 @@ int
 minilock_init(int argc, char *argv[])
 {
     parse_args(argc, argv, &CONFIG);
+    parse_config();
     struct state state = {0};
 
-    if (argc > 1)
-    {
-        if (!load_image(CONFIG.image.path, &state))
-        {
-            fprintf(stderr, "Failed to load image: %s\n", argv[1]);
-            return 1;
-        }
-    }
+    /* If there's no image, or it fails to load, the background color is used
+     * (still locking beats refusing to start). */
+    if (CONFIG.image.path && !load_image(CONFIG.image.path, &state))
+        fprintf(stderr, "Failed to load image %s, using the background color\n",
+                CONFIG.image.path);
 
     state.display = wl_display_connect(NULL);
     if (!state.display)

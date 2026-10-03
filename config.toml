@@ -1,7 +1,11 @@
-[main]
-bgcolor = "#FF5000" # if image is not specified or not loaded, this color will be used as background color
-
 [image]
+bgcolor = "#FF5000" # if image is not specified or not loaded, this color will be used as background color
 path = "~/Gits/wallpapers/10.png"
 smooth = true
-tint = "#FF5000" # if image is specified and loaded, this color will be used as tint color on top of the image
+tint = "#FF5000FF" # if image is specified and loaded, this color will be used as tint color on top of the image
+
+[indicator.input]
+show = true
+color = "#FF5000"
+type = "circle"
+radius = 10
