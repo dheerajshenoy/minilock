@@ -33,3 +33,10 @@ load_jpeg(const char *path, struct image *img);
 bool
 load_png(const char *path, struct image *img);
 #endif
+
+#ifdef HAVE_WEBP
+    #include <webp/decode.h>
+
+bool
+load_webp(const char *path, struct image *img);
+#endif

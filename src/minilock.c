@@ -24,7 +24,7 @@ load_image(const char *path, struct state *state)
     if (!state->img)
         return false;
 
-    unsigned char magic[8] = {0};
+    unsigned char magic[12] = {0};
     FILE *f                = fopen(path, "rb");
     if (f)
     {
@@ -37,6 +37,10 @@ load_image(const char *path, struct state *state)
 #ifdef HAVE_JPEG
     if (magic[0] == 0xFF && magic[1] == 0xD8)
         ok = load_jpeg(path, state->img);
+#endif
+#ifdef HAVE_WEBP
+    if (!memcmp(magic, "RIFF", 4) && !memcmp(magic + 8, "WEBP", 4))
+        ok = load_webp(path, state->img);
 #endif
 #ifdef HAVE_PNG
     if (!memcmp(magic, "\x89PNG\r\n\x1a\n", 8))

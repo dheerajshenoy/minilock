@@ -4,6 +4,25 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* The surface is opaque: composite 0xAARRGGBB pixels over the fallback color
+ * so transparency doesn't reach the compositor as non-premultiplied ARGB. */
+static void
+flatten_alpha(struct image *img)
+{
+    const uint32_t bg = 0x1E1E2E;
+    uint32_t *px      = img->data;
+    for (size_t i = 0; i < (size_t)img->width * img->height; i++)
+    {
+        uint32_t a = px[i] >> 24, out = 0;
+        for (int sh = 0; sh <= 16; sh += 8)
+        {
+            uint32_t c = (px[i] >> sh) & 0xFF, b = (bg >> sh) & 0xFF;
+            out |= ((c * a + b * (255 - a)) / 255) << sh;
+        }
+        px[i] = 0xFF000000u | out;
+    }
+}
+
 #ifdef HAVE_JPEG
 
 static void
@@ -126,20 +145,68 @@ load_png(const char *path, struct image *img)
         return false;
     }
 
-    /* The surface is opaque: composite over the fallback color so
-     * transparent pixels don't reach the compositor as ARGB. */
-    const uint32_t bg = 0x1E1E2E;
-    uint32_t *px      = img->data;
-    for (size_t i = 0; i < (size_t)img->width * img->height; i++)
+    flatten_alpha(img);
+    return true;
+}
+#endif
+
+#ifdef HAVE_WEBP
+bool
+load_webp(const char *path, struct image *img)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
     {
-        uint32_t a = px[i] >> 24, out = 0;
-        for (int sh = 0; sh <= 16; sh += 8)
-        {
-            uint32_t c = (px[i] >> sh) & 0xFF, b = (bg >> sh) & 0xFF;
-            out |= ((c * a + b * (255 - a)) / 255) << sh;
-        }
-        px[i] = 0xFF000000u | out;
+        fprintf(stderr, "Can't open %s\n", path);
+        return false;
     }
+
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    rewind(f);
+
+    uint8_t *buf = size > 0 ? malloc(size) : NULL;
+    if (!buf || fread(buf, 1, size, f) != (size_t)size)
+    {
+        fprintf(stderr, "Failed to read %s\n", path);
+        free(buf);
+        fclose(f);
+        return false;
+    }
+    fclose(f);
+
+    int w, h;
+    if (!WebPGetInfo(buf, size, &w, &h))
+    {
+        fprintf(stderr, "WebP: invalid image\n");
+        free(buf);
+        return false;
+    }
+
+    img->width  = w;
+    img->height = h;
+    img->stride = (uint32_t)w * 4;
+    img->data   = malloc((size_t)img->stride * h);
+    if (!img->data)
+    {
+        fprintf(stderr, "Failed to allocate memory for image\n");
+        free(buf);
+        return false;
+    }
+
+    /* BGRA bytes == 0xAARRGGBB as a little-endian uint32. */
+    if (!WebPDecodeBGRAInto(buf, size, img->data,
+                            (size_t)img->stride * h, img->stride))
+    {
+        fprintf(stderr, "WebP: decode failed\n");
+        free(buf);
+        free(img->data);
+        img->data = NULL;
+        return false;
+    }
+    free(buf);
+
+    flatten_alpha(img);
     return true;
 }
 #endif
