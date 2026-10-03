@@ -1,0 +1,7 @@
+[main]
+bgcolor = "#FF5000" # if image is not specified or not loaded, this color will be used as background color
+
+[image]
+path = "~/Gits/wallpapers/10.png"
+smooth = true
+tint = "#FF5000" # if image is specified and loaded, this color will be used as tint color on top of the image
