@@ -37,12 +37,12 @@ Wayland screen locking utility with wide image support (including animated ones)
 > [!NOTE]
 > Image format dependencies are loaded at runtime, so you can install them later if you want support for more image formats.
 
-# Supported Image Formats
+# Supported Image Formats (all optional)
 
 - JPEG
 - PNG
-- GIF (optional)
-- WebP (optional)
-- BMP (optional)
-- TIFF (optional)
-- SVG (optional)
+- GIF
+- WebP
+- BMP
+- TIFF
+- SVG

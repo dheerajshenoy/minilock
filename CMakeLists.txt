@@ -12,6 +12,28 @@ pkg_check_modules(WAYLAND_CLIENT REQUIRED wayland-client)
 pkg_check_modules(XKBCOMMON REQUIRED xkbcommon)
 pkg_check_modules(WAYLAND_PROTOCOLS REQUIRED wayland-protocols)
 
+set(FORMATS JPEG PNG WEBP GIF TIFF SVG AVIF HEIF)
+
+pkg_check_modules(IMG_JPEG libjpeg)
+pkg_check_modules(IMG_PNG  libpng)
+pkg_check_modules(IMG_WEBP libwebp)
+
+pkg_check_modules(IMG_GIF giflib)
+if(NOT IMG_GIF_FOUND)
+  find_path(GIF_INCLUDE_DIR gif_lib.h)
+  find_library(GIF_LIBRARY NAMES gif giflib)
+  if(GIF_INCLUDE_DIR AND GIF_LIBRARY)
+    set(IMG_GIF_FOUND TRUE)
+    set(IMG_GIF_INCLUDE_DIRS ${GIF_INCLUDE_DIR})
+    set(IMG_GIF_LIBRARIES ${GIF_LIBRARY})
+  endif()
+endif()
+
+pkg_check_modules(IMG_TIFF libtiff-4)
+pkg_check_modules(IMG_SVG  librsvg-2.0)
+pkg_check_modules(IMG_AVIF libavif)
+pkg_check_modules(IMG_HEIF libheif)
+
 find_program(WAYLAND_SCANNER wayland-scanner REQUIRED)
 find_library(PAM_LIB pam REQUIRED)
 
@@ -39,6 +61,15 @@ add_executable(${PROJECT_NAME}
   ${GEN_DIR}/ext-session-lock-v1-client-protocol.h
   ${GEN_DIR}/ext-session-lock-v1-protocol.c
 )
+
+foreach(fmt IN LISTS FORMATS)
+  if(IMG_${fmt}_FOUND)
+    target_compile_definitions(minilock PRIVATE HAVE_${fmt})
+    target_include_directories(minilock PRIVATE ${IMG_${fmt}_INCLUDE_DIRS})
+    target_link_libraries(minilock PRIVATE ${IMG_${fmt}_LIBRARIES})
+    message(STATUS "Image format enabled: ${fmt}")
+  endif()
+endforeach()
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE PROJECT_NAME="${PROJECT_NAME}")
 
