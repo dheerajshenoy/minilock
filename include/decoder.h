@@ -13,13 +13,16 @@ enum frame_disposal
     FRAME_RESTORE, /* restore the canvas from before this frame */
 };
 
-/* One animation frame, kept as the small rectangle it changes (not as a
- * full canvas) and composited on demand by the renderer. */
+/* One animation frame. GIF frames are kept as the small rectangle they change
+ * (palette indices in idx/pal). Formats that decode whole frames (animated
+ * WebP, AVIF) instead set argb to a full-canvas image and leave idx/pal NULL.
+ * Either way the renderer composites them on demand. */
 struct frame_patch
 {
     int left, top, w, h; /* rectangle on the canvas, already clipped to it */
     uint8_t *idx;        /* w*h palette indices, rows in display order */
     uint32_t *pal;       /* 256 ARGB entries */
+    uint32_t *argb;      /* full-canvas pixels, if not palette-based */
     int transparent;     /* palette index to skip, or -1 */
     enum frame_disposal disposal;
     float delay_ms;

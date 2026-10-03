@@ -17,6 +17,7 @@ set(FORMATS JPEG PNG WEBP GIF TIFF SVG AVIF HEIF)
 pkg_check_modules(IMG_JPEG libjpeg)
 pkg_check_modules(IMG_PNG  libpng)
 pkg_check_modules(IMG_WEBP libwebp)
+pkg_check_modules(IMG_WEBPDEMUX libwebpdemux) # animated WebP
 
 pkg_check_modules(IMG_GIF giflib)
 if(NOT IMG_GIF_FOUND)
@@ -76,6 +77,13 @@ foreach(fmt IN LISTS FORMATS)
     message(STATUS "Image format enabled: ${fmt}")
   endif()
 endforeach()
+
+if(IMG_WEBP_FOUND AND IMG_WEBPDEMUX_FOUND)
+  target_compile_definitions(minilock PRIVATE HAVE_WEBP_ANIM)
+  target_include_directories(minilock PRIVATE ${IMG_WEBPDEMUX_INCLUDE_DIRS})
+  target_link_libraries(minilock PRIVATE ${IMG_WEBPDEMUX_LIBRARIES})
+  message(STATUS "Animated WebP enabled")
+endif()
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE PROJECT_NAME="${PROJECT_NAME}")
 

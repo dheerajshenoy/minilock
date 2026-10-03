@@ -281,6 +281,20 @@ patch_paint(struct output *o, const struct frame_patch *p, bool clear)
     if (!patch_bbox(o, p, &x0, &y0, &x1, &y1))
         return;
 
+    if (p->argb)
+    {
+        /* Whole-frame animation: scale the frame straight onto the canvas. */
+        for (int y = y0; y < y1; y++)
+        {
+            const uint32_t *src = p->argb + (size_t)o->ymap[y] * p->w;
+            uint32_t *dst       = o->canvas + (size_t)y * o->width;
+            for (int x = x0; x < x1; x++)
+                dst[x] = clear ? IMAGE_BG : src[o->xmap[x]];
+        }
+        dirty_add(o, x0, y0, x1, y1);
+        return;
+    }
+
     for (int y = y0; y < y1; y++)
     {
         const uint8_t *row = p->idx + (size_t)(o->ymap[y] - p->top) * p->w;
@@ -694,8 +708,6 @@ minilock_init(int argc, char *argv[])
         {
             fprintf(stderr, "Failed to load image: %s\n", argv[1]);
             return 1;
-        } else {
-            printf("Loaded image: %s\n", argv[1]);
         }
     }
 
@@ -764,7 +776,6 @@ minilock_init(int argc, char *argv[])
     }
 
     wl_display_roundtrip(state.display);
-    printf("Locked. Enter your password.\n");
 
     state.auth_efd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
     if (state.auth_efd < 0)

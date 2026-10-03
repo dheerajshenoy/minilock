@@ -4,14 +4,26 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef HAVE_WEBP_ANIM
+    #include <webp/demux.h>
+#endif
+
 /* The surface is opaque: composite 0xAARRGGBB pixels over the fallback color
  * so transparency doesn't reach the compositor as non-premultiplied ARGB. */
 static void
+flatten_alpha_px(uint32_t *px, size_t n);
+
+static void
 flatten_alpha(struct image *img)
 {
+    flatten_alpha_px(img->data, (size_t)img->w * img->h);
+}
+
+static void
+flatten_alpha_px(uint32_t *px, size_t n)
+{
     const uint32_t bg = 0x1E1E2E;
-    uint32_t *px      = img->data;
-    for (size_t i = 0; i < (size_t)img->w * img->h; i++)
+    for (size_t i = 0; i < n; i++)
     {
         uint32_t a = px[i] >> 24, out = 0;
         for (int sh = 0; sh <= 16; sh += 8)
@@ -21,6 +33,69 @@ flatten_alpha(struct image *img)
         }
         px[i] = 0xFF000000u | out;
     }
+}
+
+static void
+free_patches(struct image *img)
+{
+    for (int i = 0; i < img->n_frames; i++)
+    {
+        free(img->patches[i].idx);
+        free(img->patches[i].pal);
+        free(img->patches[i].argb);
+    }
+    free(img->patches);
+    img->patches  = NULL;
+    img->n_frames = 0;
+}
+
+#define ANIM_MAX_BYTES (512u << 20) /* cap on decoded full-canvas frames */
+
+/* Start a whole-frame animation: how many of `count` frames fit the cap? */
+static int
+anim_init_full(struct image *img, uint32_t w, uint32_t h, int count)
+{
+    if (!w || !h || w > 16384 || h > 16384 || count < 1)
+        return 0;
+
+    size_t frame_bytes = (size_t)w * h * 4;
+    size_t fit         = ANIM_MAX_BYTES / frame_bytes;
+    int n              = fit < (size_t)count ? (int)(fit ? fit : 1) : count;
+    if (n < count)
+        fprintf(stderr, "Animation too large, keeping first %d of %d frames\n",
+                n, count);
+
+    img->w             = w;
+    img->h             = h;
+    img->stride        = w * 4;
+    img->current_frame = 0;
+    img->n_frames      = 0;
+    img->patches       = calloc(n, sizeof(*img->patches));
+    return img->patches ? n : 0;
+}
+
+/* Append a full-canvas frame; the caller fills p->argb and p->delay_ms. */
+static struct frame_patch *
+anim_next_full(struct image *img)
+{
+    struct frame_patch *p = &img->patches[img->n_frames];
+    p->argb               = malloc((size_t)img->stride * img->h);
+    if (!p->argb)
+        return NULL;
+    p->left = p->top = 0;
+    p->w             = img->w;
+    p->h             = img->h;
+    p->transparent   = -1;
+    p->disposal      = FRAME_KEEP;
+    img->n_frames++;
+    return p;
+}
+
+/* Like browsers, treat 0/10 ms delays as 100 ms. */
+static float
+clamp_delay(float ms)
+{
+    return ms <= 10.0f ? 100.0f : ms;
 }
 
 #ifdef HAVE_JPEG
@@ -151,6 +226,49 @@ load_png(const char *path, struct image *img)
 #endif
 
 #ifdef HAVE_WEBP
+#ifdef HAVE_WEBP_ANIM
+/* The animation decoder blends and disposes frames itself and hands back a
+ * full canvas each time, so every frame is stored whole. */
+static bool
+load_webp_anim(WebPAnimDecoder *adec, const WebPAnimInfo *info,
+               struct image *img)
+{
+    int n = anim_init_full(img, info->canvas_width, info->canvas_height,
+                           info->frame_count);
+    if (!n)
+    {
+        fprintf(stderr, "WebP: unsupported animation\n");
+        free_patches(img);
+        return false;
+    }
+
+    int prev_ts = 0;
+    while (img->n_frames < n)
+    {
+        uint8_t *canvas;
+        int ts;
+        if (!WebPAnimDecoderGetNext(adec, &canvas, &ts))
+            break;
+
+        struct frame_patch *p = anim_next_full(img);
+        if (!p)
+            break;
+        memcpy(p->argb, canvas, (size_t)img->stride * img->h);
+        flatten_alpha_px(p->argb, (size_t)img->w * img->h);
+        p->delay_ms = clamp_delay(ts - prev_ts); /* ts = end of this frame */
+        prev_ts     = ts;
+    }
+
+    if (!img->n_frames)
+    {
+        fprintf(stderr, "WebP: decode failed\n");
+        free_patches(img);
+        return false;
+    }
+    return true;
+}
+#endif
+
 bool
 load_webp(const char *path, struct image *img)
 {
@@ -174,6 +292,26 @@ load_webp(const char *path, struct image *img)
         return false;
     }
     fclose(f);
+
+#ifdef HAVE_WEBP_ANIM
+    WebPAnimDecoderOptions opts;
+    if (WebPAnimDecoderOptionsInit(&opts))
+    {
+        opts.color_mode = MODE_BGRA; /* 0xAARRGGBB on little-endian */
+        WebPData wd           = {buf, size};
+        WebPAnimDecoder *adec = WebPAnimDecoderNew(&wd, &opts);
+        WebPAnimInfo info;
+        if (adec && WebPAnimDecoderGetInfo(adec, &info) && info.frame_count > 1)
+        {
+            bool ok = load_webp_anim(adec, &info, img);
+            WebPAnimDecoderDelete(adec);
+            free(buf);
+            return ok;
+        }
+        if (adec)
+            WebPAnimDecoderDelete(adec);
+    }
+#endif
 
     int w, h;
     if (!WebPGetInfo(buf, size, &w, &h))
@@ -329,6 +467,63 @@ load_svg(const char *path, struct image *img)
 #endif
 
 #ifdef HAVE_AVIF
+/* Image sequence (`avis`): every frame is a separate full image. */
+static bool
+load_avif_anim(avifDecoder *dec, struct image *img)
+{
+    int n = 0;
+    for (int i = 0; i == 0 || img->n_frames < n; i++)
+    {
+        avifResult r = avifDecoderNextImage(dec);
+        if (r != AVIF_RESULT_OK)
+        {
+            if (i == 0)
+                fprintf(stderr, "AVIF: %s\n", avifResultToString(r));
+            break;
+        }
+
+        if (i == 0)
+        {
+            n = anim_init_full(img, dec->image->width, dec->image->height,
+                               dec->imageCount);
+            if (!n)
+            {
+                fprintf(stderr, "AVIF: unsupported size\n");
+                return false;
+            }
+        }
+        else if (dec->image->width != img->w || dec->image->height != img->h)
+            break; /* size changes mid-sequence aren't supported */
+
+        struct frame_patch *p = anim_next_full(img);
+        if (!p)
+            break;
+
+        avifRGBImage rgb;
+        avifRGBImageSetDefaults(&rgb, dec->image);
+        rgb.format   = AVIF_RGB_FORMAT_BGRA;
+        rgb.depth    = 8;
+        rgb.pixels   = (uint8_t *)p->argb;
+        rgb.rowBytes = img->stride;
+        if (avifImageYUVToRGB(dec->image, &rgb) != AVIF_RESULT_OK)
+        {
+            free(p->argb);
+            p->argb = NULL;
+            img->n_frames--;
+            break;
+        }
+        flatten_alpha_px(p->argb, (size_t)img->w * img->h);
+        p->delay_ms = clamp_delay((float)(dec->imageTiming.duration * 1000.0));
+    }
+
+    if (!img->n_frames)
+    {
+        free_patches(img);
+        return false;
+    }
+    return true;
+}
+
 bool
 load_avif(const char *path, struct image *img)
 {
@@ -339,8 +534,14 @@ load_avif(const char *path, struct image *img)
     avifResult r = avifDecoderSetIOFile(dec, path);
     if (r == AVIF_RESULT_OK)
         r = avifDecoderParse(dec);
+    if (r == AVIF_RESULT_OK && dec->imageCount > 1)
+    {
+        bool ok = load_avif_anim(dec, img);
+        avifDecoderDestroy(dec);
+        return ok;
+    }
     if (r == AVIF_RESULT_OK)
-        r = avifDecoderNextImage(dec); /* first frame only */
+        r = avifDecoderNextImage(dec); /* still image: single frame */
     if (r != AVIF_RESULT_OK)
     {
         fprintf(stderr, "AVIF: %s\n", avifResultToString(r));
@@ -608,19 +809,6 @@ load_bmp(const char *path, struct image *img)
 out:
     free(buf);
     return ok;
-}
-
-static void
-free_patches(struct image *img)
-{
-    for (int i = 0; i < img->n_frames; i++)
-    {
-        free(img->patches[i].idx);
-        free(img->patches[i].pal);
-    }
-    free(img->patches);
-    img->patches  = NULL;
-    img->n_frames = 0;
 }
 
 void
