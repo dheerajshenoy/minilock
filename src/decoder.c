@@ -27,8 +27,8 @@ load_png(const char *path, uint32_t **out, int *w, int *h)
         return false;
     }
 
-    uint32_t *px    = NULL;
-    png_bytep *rows = NULL;
+    uint32_t *volatile px    = NULL;
+    png_bytep *volatile rows = NULL;
 
     if (setjmp(png_jmpbuf(png)))
     {
