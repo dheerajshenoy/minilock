@@ -1197,8 +1197,7 @@ minilock_init(int argc, char *argv[])
             arm_timer(tfd, img->patches[img->current_frame].delay_ms);
     }
 
-    time_t end = time(NULL) + 10; /* temporary safety timeout */
-    while (!state.authenticated && time(NULL) < end)
+    while (!state.authenticated)
     {
         while (wl_display_prepare_read(state.display) != 0)
             wl_display_dispatch_pending(state.display);
