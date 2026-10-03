@@ -11,6 +11,8 @@
 #include <strings.h>
 #include <sys/mman.h>
 #include <errno.h>
+#include <pthread.h>
+#include <sys/eventfd.h>
 #include <sys/poll.h>
 #include <sys/timerfd.h>
 #include <time.h>
@@ -482,6 +484,39 @@ check_password(const char *pw)
 
 /* ---------------- keyboard ---------------- */
 
+static void *
+auth_thread(void *data)
+{
+    struct state *s = data;
+    bool ok         = check_password(s->auth_pw);
+    explicit_bzero(s->auth_pw, sizeof(s->auth_pw));
+    atomic_store(&s->auth_result, ok ? 1 : 2);
+    uint64_t one = 1;
+    if (write(s->auth_efd, &one, sizeof(one)) < 0)
+        perror("eventfd");
+    return NULL;
+}
+
+static void
+start_auth(struct state *s)
+{
+    memcpy(s->auth_pw, s->password, s->pw_len);
+    s->auth_pw[s->pw_len] = '\0';
+    explicit_bzero(s->password, sizeof(s->password));
+    s->pw_len = 0;
+
+    atomic_store(&s->auth_result, 0);
+    pthread_t t;
+    if (pthread_create(&t, NULL, auth_thread, s) != 0)
+    {
+        perror("pthread_create");
+        explicit_bzero(s->auth_pw, sizeof(s->auth_pw));
+        return;
+    }
+    pthread_detach(t);
+    s->auth_pending = true;
+}
+
 static void
 kb_keymap(void *data, struct wl_keyboard *kb, uint32_t format, int fd,
           uint32_t size)
@@ -524,7 +559,8 @@ kb_key(void *data, struct wl_keyboard *kb, uint32_t serial, uint32_t time,
        uint32_t key, uint32_t key_state)
 {
     struct state *s = data;
-    if (key_state != WL_KEYBOARD_KEY_STATE_PRESSED || !s->xkb_state)
+    if (key_state != WL_KEYBOARD_KEY_STATE_PRESSED || !s->xkb_state
+        || s->auth_pending) /* ignore typing while a check is running */
         return;
 
     /* Wayland keycodes are offset by 8 from xkb keycodes. */
@@ -533,13 +569,7 @@ kb_key(void *data, struct wl_keyboard *kb, uint32_t serial, uint32_t time,
 
     if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter)
     {
-        s->password[s->pw_len] = '\0';
-        if (check_password(s->password))
-            s->authenticated = true;
-        else
-            fprintf(stderr, "Wrong password\n");
-        explicit_bzero(s->password, sizeof(s->password));
-        s->pw_len = 0;
+        start_auth(s);
     }
     else if (sym == XKB_KEY_BackSpace)
     {
@@ -736,6 +766,13 @@ minilock_init(int argc, char *argv[])
     wl_display_roundtrip(state.display);
     printf("Locked. Enter your password.\n");
 
+    state.auth_efd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+    if (state.auth_efd < 0)
+    {
+        perror("eventfd");
+        return 1;
+    }
+
     /* Frame timer, only for animated images. */
     struct image *img = state.img;
     int tfd           = -1;
@@ -757,11 +794,12 @@ minilock_init(int argc, char *argv[])
             break;
         }
 
-        struct pollfd pfds[2] = {
+        struct pollfd pfds[3] = {
             {wl_display_get_fd(state.display), POLLIN, 0},
             {tfd, POLLIN, 0}, /* a negative fd is ignored by poll */
+            {state.auth_efd, POLLIN, 0},
         };
-        if (poll(pfds, 2, 500) <= 0)
+        if (poll(pfds, 3, 500) <= 0)
         {
             wl_display_cancel_read(state.display);
             continue;
@@ -776,6 +814,19 @@ minilock_init(int argc, char *argv[])
             wl_display_cancel_read(state.display);
         if (wl_display_dispatch_pending(state.display) < 0)
             break;
+
+        if (pfds[2].revents & POLLIN)
+        {
+            uint64_t n;
+            if (read(state.auth_efd, &n, sizeof(n)) > 0)
+            {
+                state.auth_pending = false;
+                if (atomic_load(&state.auth_result) == 1)
+                    state.authenticated = true;
+                else
+                    fprintf(stderr, "Wrong password\n");
+            }
+        }
 
         if (tfd >= 0 && (pfds[1].revents & POLLIN))
         {
@@ -795,6 +846,7 @@ minilock_init(int argc, char *argv[])
     }
     if (tfd >= 0)
         close(tfd);
+    close(state.auth_efd);
 
     ext_session_lock_v1_unlock_and_destroy(state.lock);
     wl_display_roundtrip(state.display); /* flush the unlock request */

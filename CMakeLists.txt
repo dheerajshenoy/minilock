@@ -36,6 +36,7 @@ pkg_check_modules(IMG_HEIF libheif)
 
 find_program(WAYLAND_SCANNER wayland-scanner REQUIRED)
 find_library(PAM_LIB pam REQUIRED)
+find_package(Threads REQUIRED)
 
 pkg_get_variable(PROTO_DIR wayland-protocols pkgdatadir)
 set(LOCK_XML ${PROTO_DIR}/staging/ext-session-lock/ext-session-lock-v1.xml)
@@ -81,4 +82,5 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE PROJECT_NAME="${PROJECT_NAME}
 target_include_directories(${PROJECT_NAME} PRIVATE
   ${GEN_DIR} ${WAYLAND_CLIENT_INCLUDE_DIRS} ${XKBCOMMON_INCLUDE_DIRS})
 target_link_libraries(${PROJECT_NAME} PRIVATE
-  ${WAYLAND_CLIENT_LIBRARIES} ${XKBCOMMON_LIBRARIES} ${PAM_LIB})
+  ${WAYLAND_CLIENT_LIBRARIES} ${XKBCOMMON_LIBRARIES} ${PAM_LIB}
+  Threads::Threads)

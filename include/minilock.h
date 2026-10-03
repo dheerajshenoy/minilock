@@ -4,6 +4,7 @@
 #include "ext-session-lock-v1-client-protocol.h"
 
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -58,6 +59,13 @@ struct state
     char password[256];
     size_t pw_len;
     bool authenticated;
+
+    /* PAM runs on a worker thread so a failed attempt's delay (pam_faildelay,
+     * usually ~2s) doesn't freeze the event loop and the animation. */
+    bool auth_pending;
+    char auth_pw[256];
+    atomic_int auth_result; /* 0 running, 1 ok, 2 wrong */
+    int auth_efd;           /* eventfd signalled when the worker finishes */
 
     struct image *img;
 };
