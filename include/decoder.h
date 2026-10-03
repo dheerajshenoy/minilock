@@ -28,6 +28,8 @@ load_jpeg(const char *path, struct image *img);
 #endif
 
 #ifdef HAVE_PNG
+    #include <png.h>
+
 bool
 load_png(const char *path, struct image *img);
 #endif

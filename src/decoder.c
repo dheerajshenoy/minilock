@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #ifdef HAVE_JPEG
 
@@ -85,6 +86,60 @@ load_jpeg(const char *path, struct image *img)
     (void)jpeg_finish_decompress(&cinfo);
     jpeg_destroy_decompress(&cinfo);
     fclose(infile);
+    return true;
+}
+#endif
+
+#ifdef HAVE_PNG
+bool
+load_png(const char *path, struct image *img)
+{
+    png_image png;
+    memset(&png, 0, sizeof(png));
+    png.version = PNG_IMAGE_VERSION;
+
+    if (!png_image_begin_read_from_file(&png, path))
+    {
+        fprintf(stderr, "PNG: %s\n", png.message);
+        return false;
+    }
+
+    /* BGRA bytes == 0xAARRGGBB as a little-endian uint32. */
+    png.format  = PNG_FORMAT_BGRA;
+    img->width  = png.width;
+    img->height = png.height;
+    img->stride = png.width * 4;
+    img->data   = malloc((size_t)img->stride * img->height);
+    if (!img->data)
+    {
+        fprintf(stderr, "Failed to allocate memory for image\n");
+        png_image_free(&png);
+        return false;
+    }
+
+    if (!png_image_finish_read(&png, NULL, img->data, img->stride, NULL))
+    {
+        fprintf(stderr, "PNG: %s\n", png.message);
+        png_image_free(&png);
+        free(img->data);
+        img->data = NULL;
+        return false;
+    }
+
+    /* The surface is opaque: composite over the fallback color so
+     * transparent pixels don't reach the compositor as ARGB. */
+    const uint32_t bg = 0x1E1E2E;
+    uint32_t *px      = img->data;
+    for (size_t i = 0; i < (size_t)img->width * img->height; i++)
+    {
+        uint32_t a = px[i] >> 24, out = 0;
+        for (int sh = 0; sh <= 16; sh += 8)
+        {
+            uint32_t c = (px[i] >> sh) & 0xFF, b = (bg >> sh) & 0xFF;
+            out |= ((c * a + b * (255 - a)) / 255) << sh;
+        }
+        px[i] = 0xFF000000u | out;
+    }
     return true;
 }
 #endif

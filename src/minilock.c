@@ -24,9 +24,23 @@ load_image(const char *path, struct state *state)
     if (!state->img)
         return false;
 
+    unsigned char magic[8] = {0};
+    FILE *f                = fopen(path, "rb");
+    if (f)
+    {
+        if (fread(magic, 1, sizeof(magic), f) < sizeof(magic))
+            memset(magic, 0, sizeof(magic));
+        fclose(f);
+    }
+
     bool ok = false;
 #ifdef HAVE_JPEG
-    ok = load_jpeg(path, state->img);
+    if (magic[0] == 0xFF && magic[1] == 0xD8)
+        ok = load_jpeg(path, state->img);
+#endif
+#ifdef HAVE_PNG
+    if (!memcmp(magic, "\x89PNG\r\n\x1a\n", 8))
+        ok = load_png(path, state->img);
 #endif
     if (!ok)
     {
