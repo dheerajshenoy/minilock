@@ -47,3 +47,10 @@ load_webp(const char *path, struct image *img);
 bool
 load_tiff(const char *path, struct image *img);
 #endif
+
+#ifdef HAVE_SVG
+    #include <librsvg/rsvg.h>
+
+bool
+load_svg(const char *path, struct image *img);
+#endif

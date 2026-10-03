@@ -258,3 +258,72 @@ load_tiff(const char *path, struct image *img)
     return true;
 }
 #endif
+
+#ifdef HAVE_SVG
+bool
+load_svg(const char *path, struct image *img)
+{
+    GError *err       = NULL;
+    RsvgHandle *svg   = rsvg_handle_new_from_file(path, &err);
+    if (!svg)
+    {
+        fprintf(stderr, "SVG: %s\n", err ? err->message : "load failed");
+        g_clear_error(&err);
+        return false;
+    }
+
+    double iw, ih;
+    if (!rsvg_handle_get_intrinsic_size_in_pixels(svg, &iw, &ih) || iw < 1
+        || ih < 1)
+    {
+        /* No intrinsic size (e.g. only a viewBox): pick a sane default. */
+        iw = 1920;
+        ih = 1080;
+    }
+
+    /* Vectors have no native size, so rasterize at least 1920px wide. */
+    double scale = iw < 1920 ? 1920 / iw : 1.0;
+    int w        = (int)(iw * scale + 0.5);
+    int h        = (int)(ih * scale + 0.5);
+    if (w > 16384 || h > 16384)
+    {
+        fprintf(stderr, "SVG: image too large\n");
+        g_object_unref(svg);
+        return false;
+    }
+
+    img->width  = w;
+    img->height = h;
+    img->stride = (uint32_t)w * 4;
+    img->data   = calloc(h, img->stride);
+    if (!img->data)
+    {
+        fprintf(stderr, "Failed to allocate memory for image\n");
+        g_object_unref(svg);
+        return false;
+    }
+
+    cairo_surface_t *surf = cairo_image_surface_create_for_data(
+        img->data, CAIRO_FORMAT_ARGB32, w, h, img->stride);
+    cairo_t *cr = cairo_create(surf);
+
+    /* Opaque fallback background (#1E1E2E) under any transparency. */
+    cairo_set_source_rgb(cr, 0x1E / 255.0, 0x1E / 255.0, 0x2E / 255.0);
+    cairo_paint(cr);
+
+    RsvgRectangle viewport = {0, 0, w, h};
+    bool ok = rsvg_handle_render_document(svg, cr, &viewport, &err);
+    if (!ok)
+    {
+        fprintf(stderr, "SVG: %s\n", err ? err->message : "render failed");
+        g_clear_error(&err);
+        free(img->data);
+        img->data = NULL;
+    }
+
+    cairo_destroy(cr);
+    cairo_surface_destroy(surf);
+    g_object_unref(svg);
+    return ok;
+}
+#endif

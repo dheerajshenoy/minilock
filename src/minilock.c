@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/mman.h>
 #include <sys/poll.h>
 #include <time.h>
@@ -46,6 +47,12 @@ load_image(const char *path, struct state *state)
     if (!memcmp(magic, "II*\0", 4) || !memcmp(magic, "MM\0*", 4)
         || !memcmp(magic, "II+\0", 4) || !memcmp(magic, "MM\0+", 4))
         ok = load_tiff(path, state->img);
+#endif
+#ifdef HAVE_SVG
+    /* SVG is text with no magic bytes, so go by extension. */
+    const char *ext = strrchr(path, '.');
+    if (ext && (!strcasecmp(ext, ".svg") || !strcasecmp(ext, ".svgz")))
+        ok = load_svg(path, state->img);
 #endif
 #ifdef HAVE_PNG
     if (!memcmp(magic, "\x89PNG\r\n\x1a\n", 8))
