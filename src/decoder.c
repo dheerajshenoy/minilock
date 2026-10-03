@@ -153,3 +153,68 @@ load_jpeg(const char *path, uint32_t **out, int *w, int *h)
     return true;
 }
 #endif
+
+#ifdef HAVE_WEBP
+#include <webp/decode.h>
+
+bool
+load_webp(const char *path, uint32_t **out, int *w, int *h)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return false;
+
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (size <= 0)
+    {
+        fclose(f);
+        return false;
+    }
+
+    uint8_t *data = malloc(size);
+    if (!data || fread(data, 1, size, f) != (size_t)size)
+    {
+        free(data);
+        fclose(f);
+        return false;
+    }
+    fclose(f);
+
+    int width, height;
+    if (!WebPGetInfo(data, size, &width, &height))
+    {
+        free(data);
+        return false;
+    }
+
+    uint8_t *rgba = WebPDecodeRGBA(data, size, &width, &height);
+    free(data);
+    if (!rgba)
+        return false;
+
+    size_t count = (size_t)width * height;
+    uint32_t *px = malloc(count * 4);
+    if (!px)
+    {
+        WebPFree(rgba);
+        return false;
+    }
+
+    for (size_t i = 0; i < count; i++)
+    {
+        uint32_t a = rgba[i * 4 + 3];
+        uint32_t r = rgba[i * 4 + 0] * a / 255;
+        uint32_t g = rgba[i * 4 + 1] * a / 255;
+        uint32_t b = rgba[i * 4 + 2] * a / 255;
+        px[i] = (a << 24) | (r << 16) | (g << 8) | b;
+    }
+    WebPFree(rgba);
+
+    *out = px;
+    *w   = width;
+    *h   = height;
+    return true;
+}
+#endif

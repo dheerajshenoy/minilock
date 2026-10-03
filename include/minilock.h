@@ -60,14 +60,22 @@ struct state
 static bool
 load_image(struct state *s, const char *path)
 {
+
 #ifdef HAVE_PNG
     if (load_png(path, &s->img_px, &s->img_w, &s->img_h))
         return true;
 #endif
+
 #ifdef HAVE_JPEG
     if (load_jpeg(path, &s->img_px, &s->img_w, &s->img_h))
         return true;
 #endif
+
+#ifdef HAVE_WEBP
+    if (load_webp(path, &s->img_px, &s->img_w, &s->img_h))
+        return true;
+#endif
+
     fprintf(stderr, "Cannot load image (unsupported or invalid): %s\n", path);
     return false;
 }

@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+// PNG
 #ifdef HAVE_PNG
     #include <png.h>
 
@@ -11,6 +12,7 @@ load_png(const char *path, uint32_t **out, int *w, int *h);
 
 #endif
 
+// JPEG
 #ifdef HAVE_JPEG
     #include <jpeglib.h>
 
@@ -32,4 +34,12 @@ jpeg_err_exit(j_common_ptr cinfo)
 
 bool
 load_jpeg(const char *path, uint32_t **out, int *w, int *h);
+#endif
+
+// WEBP
+#ifdef HAVE_WEBP
+    #include <webp/decode.h>
+
+bool
+load_webp(const char *path, uint32_t **out, int *w, int *h);
 #endif
