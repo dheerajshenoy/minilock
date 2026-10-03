@@ -8,7 +8,8 @@ service = "login"
 
 [image]
 bgcolor = "#FF5000" # if image is not specified or not loaded, this color will be used as background color
-path = "~/Downloads/9bc27292880429.5e569ff84e4d0.gif"
+# path = "~/Downloads/9bc27292880429.5e569ff84e4d0.gif"
+path = "~/Gits/wallpapers/40.png"
 smooth = true
 tint = "#FF500044" # if image is specified and loaded, this color will be used as tint color on top of the image
 

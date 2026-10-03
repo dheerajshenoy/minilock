@@ -226,7 +226,7 @@ load_png(const char *path, struct image *img)
 #endif
 
 #ifdef HAVE_WEBP
-#ifdef HAVE_WEBP_ANIM
+    #ifdef HAVE_WEBP_ANIM
 /* The animation decoder blends and disposes frames itself and hands back a
  * full canvas each time, so every frame is stored whole. */
 static bool
@@ -267,7 +267,7 @@ load_webp_anim(WebPAnimDecoder *adec, const WebPAnimInfo *info,
     }
     return true;
 }
-#endif
+    #endif
 
 bool
 load_webp(const char *path, struct image *img)
@@ -293,11 +293,11 @@ load_webp(const char *path, struct image *img)
     }
     fclose(f);
 
-#ifdef HAVE_WEBP_ANIM
+    #ifdef HAVE_WEBP_ANIM
     WebPAnimDecoderOptions opts;
     if (WebPAnimDecoderOptionsInit(&opts))
     {
-        opts.color_mode = MODE_BGRA; /* 0xAARRGGBB on little-endian */
+        opts.color_mode       = MODE_BGRA; /* 0xAARRGGBB on little-endian */
         WebPData wd           = {buf, size};
         WebPAnimDecoder *adec = WebPAnimDecoderNew(&wd, &opts);
         WebPAnimInfo info;
@@ -311,7 +311,7 @@ load_webp(const char *path, struct image *img)
         if (adec)
             WebPAnimDecoderDelete(adec);
     }
-#endif
+    #endif
 
     int w, h;
     if (!WebPGetInfo(buf, size, &w, &h))
@@ -848,6 +848,79 @@ image_tint(struct image *img, uint32_t tint)
     }
 }
 
+bool
+image_to_full_frames(struct image *img)
+{
+    if (!img->patches || img->patches[0].argb)
+        return true; /* still image, or frames are already whole */
+
+    size_t px = (size_t)img->w * img->h, bytes = px * sizeof(uint32_t);
+    size_t fit = ANIM_MAX_BYTES / bytes;
+    int n = (size_t)img->n_frames > fit ? (int)(fit ? fit : 1) : img->n_frames;
+    if (n < img->n_frames)
+        fprintf(stderr, "Animation too large, keeping first %d of %d frames\n",
+                n, img->n_frames);
+
+    struct frame_patch *nf = calloc(n, sizeof(*nf));
+    uint32_t *canvas = malloc(bytes), *prev = malloc(bytes);
+    bool ok = nf && canvas && prev;
+
+    for (size_t i = 0; ok && i < px; i++)
+        canvas[i] = IMAGE_BG;
+
+    for (int i = 0; ok && i < n; i++)
+    {
+        const struct frame_patch *p = &img->patches[i];
+        if (p->disposal == FRAME_RESTORE)
+            memcpy(prev, canvas, bytes);
+
+        for (int y = 0; y < p->h; y++)
+            for (int x = 0; x < p->w; x++)
+            {
+                uint8_t c = p->idx[(size_t)y * p->w + x];
+                if (c != p->transparent)
+                    canvas[(size_t)(p->top + y) * img->w + p->left + x]
+                        = p->pal[c];
+            }
+
+        nf[i].argb = malloc(bytes);
+        if (!(ok = nf[i].argb != NULL))
+            break;
+        memcpy(nf[i].argb, canvas, bytes);
+        nf[i].w           = img->w;
+        nf[i].h           = img->h;
+        nf[i].transparent = -1;
+        nf[i].disposal    = FRAME_KEEP;
+        nf[i].delay_ms    = p->delay_ms;
+
+        if (p->disposal == FRAME_CLEAR)
+        {
+            for (int y = 0; y < p->h; y++)
+                for (int x = 0; x < p->w; x++)
+                    canvas[(size_t)(p->top + y) * img->w + p->left + x]
+                        = IMAGE_BG;
+        }
+        else if (p->disposal == FRAME_RESTORE)
+            memcpy(canvas, prev, bytes);
+    }
+    free(canvas);
+    free(prev);
+
+    if (!ok)
+    {
+        for (int i = 0; nf && i < n; i++)
+            free(nf[i].argb);
+        free(nf);
+        fprintf(stderr, "Out of memory converting animation frames\n");
+        return false;
+    }
+
+    free_patches(img); /* the palette frames */
+    img->patches  = nf;
+    img->n_frames = n;
+    return true;
+}
+
 void
 image_free(struct image *img)
 {
@@ -914,10 +987,9 @@ load_gif(const char *path, struct image *img)
     size_t total = 0;
     for (int i = 0; i < gif->ImageCount; i++)
     {
-        const SavedImage *frame = &gif->SavedImages[i];
-        const GifImageDesc *d   = &frame->ImageDesc;
-        const ColorMapObject *cmap
-            = d->ColorMap ? d->ColorMap : gif->SColorMap;
+        const SavedImage *frame    = &gif->SavedImages[i];
+        const GifImageDesc *d      = &frame->ImageDesc;
+        const ColorMapObject *cmap = d->ColorMap ? d->ColorMap : gif->SColorMap;
         if (!cmap || !frame->RasterBits)
         {
             fprintf(stderr, "GIF: frame %d has no color map or pixels\n", i);
@@ -928,9 +1000,9 @@ load_gif(const char *path, struct image *img)
         int x0 = d->Left > 0 ? d->Left : 0;
         int y0 = d->Top > 0 ? d->Top : 0;
         int x1 = d->Left + d->Width < gif->SWidth ? d->Left + d->Width
-                                                   : gif->SWidth;
+                                                  : gif->SWidth;
         int y1 = d->Top + d->Height < gif->SHeight ? d->Top + d->Height
-                                                    : gif->SHeight;
+                                                   : gif->SHeight;
         int pw = x1 > x0 ? x1 - x0 : 0, ph = y1 > y0 ? y1 - y0 : 0;
         if (!pw || !ph)
             pw = ph = 0;
@@ -959,10 +1031,10 @@ load_gif(const char *path, struct image *img)
         p->h           = ph;
         p->transparent = gcb.TransparentColor;
         /* Like browsers, treat 0/10 ms delays as 100 ms. */
-        p->delay_ms = gcb.DelayTime <= 1 ? 100.0f : gcb.DelayTime * 10.0f;
-        p->disposal = gcb.DisposalMode == DISPOSE_BACKGROUND ? FRAME_CLEAR
-                      : gcb.DisposalMode == DISPOSE_PREVIOUS ? FRAME_RESTORE
-                                                             : FRAME_KEEP;
+        p->delay_ms    = gcb.DelayTime <= 1 ? 100.0f : gcb.DelayTime * 10.0f;
+        p->disposal    = gcb.DisposalMode == DISPOSE_BACKGROUND ? FRAME_CLEAR
+                         : gcb.DisposalMode == DISPOSE_PREVIOUS ? FRAME_RESTORE
+                                                                : FRAME_KEEP;
 
         p->pal = calloc(256, sizeof(*p->pal));
         p->idx = pw ? malloc((size_t)pw * ph) : NULL;
@@ -999,3 +1071,43 @@ fail:
     return false;
 }
 #endif
+
+void
+image_copy(struct image *dst, const struct image *src)
+{
+    if (!dst || !src)
+        return;
+
+    dst->w             = src->w;
+    dst->h             = src->h;
+    dst->stride        = src->stride;
+    dst->current_frame = src->current_frame;
+    dst->n_frames      = src->n_frames;
+
+    size_t bytes = (size_t)src->stride * src->h;
+    dst->data    = malloc(bytes);
+    if (dst->data)
+        memcpy(dst->data, src->data, bytes);
+
+    if (src->patches)
+    {
+        dst->patches = calloc((size_t)src->n_frames, sizeof(*dst->patches));
+        if (dst->patches)
+            for (int i = 0; i < src->n_frames; i++)
+            {
+                const struct frame_patch *s = &src->patches[i];
+                struct frame_patch *d       = &dst->patches[i];
+                *d                          = *s;
+                size_t pbytes = (size_t)s->w * s->h * sizeof(uint32_t);
+                d->argb       = s->argb ? malloc(pbytes) : NULL;
+                d->idx        = s->idx ? malloc((size_t)s->w * s->h) : NULL;
+                d->pal        = s->pal ? malloc(256 * sizeof(uint32_t)) : NULL;
+                if (d->argb)
+                    memcpy(d->argb, s->argb, pbytes);
+                if (d->idx)
+                    memcpy(d->idx, s->idx, (size_t)s->w * s->h);
+                if (d->pal)
+                    memcpy(d->pal, s->pal, 256 * sizeof(uint32_t));
+            }
+    }
+}

@@ -19,10 +19,8 @@ struct PAM
 
 enum BlurType
 {
+    BLUR_BOX = 0,
     BLUR_GAUSSIAN,
-    BLUR_BOX,
-    BLUR_KAWASE,
-    BLUR_BILATERAL,
 };
 
 struct BlurConfig
@@ -36,6 +34,7 @@ struct BlurConfig
 /* All colors are 0xAARRGGBB; 0 means "not set". */
 struct ImageConfig
 {
+    bool cache;       // whether to cache the image in memory (default: true)
     uint32_t bgcolor; /* shown if there is no image (or it failed to load) */
     const char *path;
     bool smooth;

@@ -45,6 +45,12 @@ struct image
 void
 image_tint(struct image *img, uint32_t tint);
 
+/* Turn a palette-based (GIF) animation into whole-canvas frames, applying the
+ * disposal rules once. Needed before per-pixel effects such as blur. Keeps
+ * only the first frames that fit the memory cap. */
+bool
+image_to_full_frames(struct image *img);
+
 /* Free an image and everything it owns. */
 void
 image_free(struct image *img);
@@ -115,3 +121,6 @@ load_bmp(const char *path, struct image *img);
 bool
 load_gif(const char *path, struct image *img);
 #endif
+
+void
+image_copy(struct image *dst, const struct image *src);

@@ -78,6 +78,7 @@ add_executable(${PROJECT_NAME}
   src/main.c
   src/minilock.c
   src/decoder.c
+  src/blur.c
   src/tomlc17.c
   ${GEN_DIR}/ext-session-lock-v1-client-protocol.h
   ${GEN_DIR}/ext-session-lock-v1-protocol.c
@@ -112,5 +113,5 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE PROJECT_VERSION="${PROJECT_VE
 target_include_directories(${PROJECT_NAME} PRIVATE
   ${GEN_DIR} ${WAYLAND_CLIENT_INCLUDE_DIRS} ${XKBCOMMON_INCLUDE_DIRS})
 target_link_libraries(${PROJECT_NAME} PRIVATE
-  ${WAYLAND_CLIENT_LIBRARIES} ${XKBCOMMON_LIBRARIES} ${PAM_LIB}
+  ${WAYLAND_CLIENT_LIBRARIES} ${XKBCOMMON_LIBRARIES} ${PAM_LIB} m
   Threads::Threads)

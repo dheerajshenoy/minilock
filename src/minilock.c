@@ -1,5 +1,6 @@
 #include "minilock.h"
 
+#include "blur.h"
 #include "config.h"
 #include "decoder.h"
 #include "tomlc17.h"
@@ -23,10 +24,21 @@
 #include <xkbcommon/xkbcommon.h>
 
 /* Defaults; parse_config overrides what the file sets. */
-static struct Config CONFIG = {.behavior = {.fail_delay_s = 2.0f}};
+static struct Config CONFIG = {
+    .behavior
+    = {.daemonize = true, .ignore_empty_password = true, .fail_delay_s = 2.0f},
+    .image = {.bgcolor = 0xFFFF5000,
+              .cache   = true,
+              .blur    = {.radius = 10, .iterations = 1}},
+};
 
 static void
-free_image(struct state *state);
+free_image(struct state *state)
+{
+    image_free(state->img);
+    state->img = NULL;
+}
+
 
 bool
 load_image(const char *path, struct state *state)
@@ -95,13 +107,6 @@ load_image(const char *path, struct state *state)
         free_image(state);
     }
     return ok;
-}
-
-void
-free_image(struct state *state)
-{
-    image_free(state->img);
-    state->img = NULL;
 }
 
 /* ---------------- lock ---------------- */
@@ -234,8 +239,8 @@ static inline uint32_t
 lerp_px(uint32_t a, uint32_t b, uint32_t f)
 {
     uint32_t rb = ((a & 0x00FF00FFu) * (256 - f) + (b & 0x00FF00FFu) * f) >> 8;
-    uint32_t ag = (((a >> 8) & 0x00FF00FFu) * (256 - f)
-                   + ((b >> 8) & 0x00FF00FFu) * f);
+    uint32_t ag
+        = (((a >> 8) & 0x00FF00FFu) * (256 - f) + ((b >> 8) & 0x00FF00FFu) * f);
     return (rb & 0x00FF00FFu) | (ag & 0xFF00FF00u);
 }
 
@@ -249,9 +254,9 @@ scale_rect(uint32_t *dst, uint32_t dst_w, const struct axis *xm,
     for (int y = r->y0; y < r->y1; y++)
     {
         const struct axis *ya = &ym[y];
-        const uint32_t *r0 = src + (size_t)ya->i0 * src_w;
-        const uint32_t *r1 = src + (size_t)ya->i1 * src_w;
-        uint32_t *out      = dst + (size_t)y * dst_w;
+        const uint32_t *r0    = src + (size_t)ya->i0 * src_w;
+        const uint32_t *r1    = src + (size_t)ya->i1 * src_w;
+        uint32_t *out         = dst + (size_t)y * dst_w;
 
         if (!smooth)
         {
@@ -263,7 +268,7 @@ scale_rect(uint32_t *dst, uint32_t dst_w, const struct axis *xm,
         for (int x = r->x0; x < r->x1; x++)
         {
             const struct axis *xa = &xm[x];
-            uint32_t px = lerp_px(r0[xa->i0], r0[xa->i1], xa->f);
+            uint32_t px           = lerp_px(r0[xa->i0], r0[xa->i1], xa->f);
             if (ya->f)
                 px = lerp_px(px, lerp_px(r1[xa->i0], r1[xa->i1], xa->f), ya->f);
             out[x] = px;
@@ -306,10 +311,14 @@ rect_add(struct rect *r, int x0, int y0, int x1, int y1)
         *r = (struct rect){x0, y0, x1, y1};
         return;
     }
-    if (x0 < r->x0) r->x0 = x0;
-    if (y0 < r->y0) r->y0 = y0;
-    if (x1 > r->x1) r->x1 = x1;
-    if (y1 > r->y1) r->y1 = y1;
+    if (x0 < r->x0)
+        r->x0 = x0;
+    if (y0 < r->y0)
+        r->y0 = y0;
+    if (x1 > r->x1)
+        r->x1 = x1;
+    if (y1 > r->y1)
+        r->y1 = y1;
 }
 
 /* Draw palette patch p onto the source canvas, or clear its rectangle. */
@@ -330,8 +339,7 @@ src_paint(struct state *s, const struct frame_patch *p, bool clear)
         }
     }
     if (p->w && p->h)
-        rect_add(&s->src_dirty, p->left, p->top, p->left + p->w,
-                 p->top + p->h);
+        rect_add(&s->src_dirty, p->left, p->top, p->left + p->w, p->top + p->h);
 }
 
 /* Advance the shared source from the frame shown so far to frame k, leaving
@@ -339,8 +347,8 @@ src_paint(struct state *s, const struct frame_patch *p, bool clear)
 static void
 src_step(struct state *s, int k)
 {
-    const struct image *img = s->img;
-    size_t px               = (size_t)img->w * img->h;
+    const struct image *img     = s->img;
+    size_t px                   = (size_t)img->w * img->h;
     const struct frame_patch *p = &img->patches[k];
 
     s->src_dirty = (struct rect){0};
@@ -436,8 +444,8 @@ anim_setup(struct output *o)
 
     build_axes(o->width, o->height, img, o->xm, o->ym, CONFIG.image.smooth);
     o->dirty = (struct rect){0, 0, (int)o->width, (int)o->height};
-    scale_rect(o->canvas, o->width, o->xm, o->ym, &o->dirty, s->src_cur,
-               img->w, CONFIG.image.smooth);
+    scale_rect(o->canvas, o->width, o->xm, o->ym, &o->dirty, s->src_cur, img->w,
+               CONFIG.image.smooth);
 }
 
 /* Re-scale the part of this output affected by a change in source region r. */
@@ -885,7 +893,7 @@ expand_home(const char *path)
     if (!path || path[0] != '~' || path[1] != '/' || !home)
         return path;
 
-    size_t n = strlen(home) + strlen(path);
+    size_t n  = strlen(home) + strlen(path);
     char *out = malloc(n);
     if (!out)
         return path;
@@ -917,38 +925,44 @@ parse_config(void)
         K_FLOAT, /* TOML float or integer -> float */
         K_COLOR, /* "#RRGGBB" or "#RRGGBBAA" -> uint32_t 0xAARRGGBB */
         K_TINT,  /* "#RRGGBBAA" only -> uint32_t 0xAARRGGBB */
+        K_BLUR,  /* "box" | "gaussian" | "kawase" | "stack" -> BlurType */
+        K_POS,   /* integer >= 1 -> int */
     };
     struct
     {
         const char *key;
         enum kind kind;
         void *dest;
-    } entries[] = {
-        {"image.bgcolor", K_COLOR, &CONFIG.image.bgcolor},
-        {"image.path", K_STRING, &CONFIG.image.path},
-        {"image.smooth", K_BOOL, &CONFIG.image.smooth},
-        {"image.tint", K_TINT, &CONFIG.image.tint_argb},
+    } entries[]
+        = {{"image.bgcolor", K_COLOR, &CONFIG.image.bgcolor},
+           {"image.path", K_STRING, &CONFIG.image.path},
+           {"image.smooth", K_BOOL, &CONFIG.image.smooth},
+           {"image.tint", K_TINT, &CONFIG.image.tint_argb},
+           {"image.blur.enable", K_BOOL, &CONFIG.image.blur.enable},
+           {"image.blur.radius", K_POS, &CONFIG.image.blur.radius},
+           {"image.blur.iterations", K_POS, &CONFIG.image.blur.iterations},
+           {"image.blur.type", K_BLUR, &CONFIG.image.blur.type},
 
-        {"behavior.ignore_empty_password", K_BOOL,
-         &CONFIG.behavior.ignore_empty_password},
-        {"behavior.fail_delay_s", K_FLOAT, &CONFIG.behavior.fail_delay_s},
-        {"behavior.daemonize", K_BOOL, &CONFIG.behavior.daemonize},
+           {"behavior.ignore_empty_password", K_BOOL,
+            &CONFIG.behavior.ignore_empty_password},
+           {"behavior.fail_delay_s", K_FLOAT, &CONFIG.behavior.fail_delay_s},
+           {"behavior.daemonize", K_BOOL, &CONFIG.behavior.daemonize},
 
-        {"indicator.input.show", K_BOOL, &CONFIG.input_indicator.show},
-        {"indicator.input.color", K_COLOR, &CONFIG.input_indicator.color},
-        {"indicator.input.color_idle", K_COLOR,
-         &CONFIG.input_indicator.color_idle},
-        {"indicator.input.color_typing", K_COLOR,
-         &CONFIG.input_indicator.color_typing},
-        {"indicator.input.color_wrong", K_COLOR,
-         &CONFIG.input_indicator.color_wrong},
-        {"indicator.input.color_correct", K_COLOR,
-         &CONFIG.input_indicator.color_correct},
-        {"indicator.input.color_verifying", K_COLOR,
-         &CONFIG.input_indicator.color_verifying},
-        {"indicator.input.type", K_STRING, &CONFIG.input_indicator.type},
-        {"indicator.input.radius", K_INT, &CONFIG.input_indicator.radius},
-        {0, 0, 0}};
+           {"indicator.input.show", K_BOOL, &CONFIG.input_indicator.show},
+           {"indicator.input.color", K_COLOR, &CONFIG.input_indicator.color},
+           {"indicator.input.color_idle", K_COLOR,
+            &CONFIG.input_indicator.color_idle},
+           {"indicator.input.color_typing", K_COLOR,
+            &CONFIG.input_indicator.color_typing},
+           {"indicator.input.color_wrong", K_COLOR,
+            &CONFIG.input_indicator.color_wrong},
+           {"indicator.input.color_correct", K_COLOR,
+            &CONFIG.input_indicator.color_correct},
+           {"indicator.input.color_verifying", K_COLOR,
+            &CONFIG.input_indicator.color_verifying},
+           {"indicator.input.type", K_STRING, &CONFIG.input_indicator.type},
+           {"indicator.input.radius", K_INT, &CONFIG.input_indicator.radius},
+           {0, 0, 0}};
 
     for (int i = 0; entries[i].key; i++)
     {
@@ -956,13 +970,13 @@ parse_config(void)
         if (datum.type == TOML_UNKNOWN)
             continue; /* key not present: keep the default */
 
-        enum kind k = entries[i].kind;
-        toml_type_t want = k == K_BOOL  ? TOML_BOOLEAN
-                           : k == K_INT ? TOML_INT64
-                                        : TOML_STRING;
-        bool type_ok = k == K_FLOAT ? datum.type == TOML_FP64
-                                          || datum.type == TOML_INT64
-                                    : datum.type == want;
+        enum kind k      = entries[i].kind;
+        toml_type_t want = k == K_BOOL                  ? TOML_BOOLEAN
+                           : (k == K_INT || k == K_POS) ? TOML_INT64
+                                                        : TOML_STRING;
+        bool type_ok = k == K_FLOAT
+                           ? datum.type == TOML_FP64 || datum.type == TOML_INT64
+                           : datum.type == want;
         if (!type_ok)
             toml_error("Invalid type for key: ", entries[i].key);
 
@@ -979,6 +993,33 @@ parse_config(void)
             case K_INT:
                 *(int *)entries[i].dest = (int)datum.u.int64;
                 break;
+            case K_POS:
+                if (datum.u.int64 < 1 || datum.u.int64 > 1000)
+                    toml_error("Must be between 1 and 1000: ", entries[i].key);
+                *(int *)entries[i].dest = (int)datum.u.int64;
+                break;
+            case K_BLUR:
+            {
+                static const struct
+                {
+                    const char *name;
+                    enum BlurType type;
+                } types[] = {{"box", BLUR_BOX}, {"gaussian", BLUR_GAUSSIAN}};
+
+                bool found = false;
+
+                for (size_t t = 0; t < sizeof(types) / sizeof(*types); t++)
+                    if (!strcmp(datum.u.s, types[t].name))
+                    {
+                        *(enum BlurType *)entries[i].dest = types[t].type;
+                        found                             = true;
+                    }
+                if (!found)
+                    toml_error("Unknown blur type (use box, gaussian, kawase "
+                               "or stack) for key: ",
+                               entries[i].key);
+                break;
+            }
             case K_FLOAT:
                 *(float *)entries[i].dest = datum.type == TOML_FP64
                                                 ? (float)datum.u.fp64
@@ -990,11 +1031,12 @@ parse_config(void)
             case K_TINT:
                 if (!parse_color(datum.u.s, k == K_TINT,
                                  (uint32_t *)entries[i].dest))
-                    toml_error(k == K_TINT
-                                   ? "Invalid color (expected #RRGGBBAA) for key: "
-                                   : "Invalid color (expected #RRGGBB or "
-                                     "#RRGGBBAA) for key: ",
-                               entries[i].key);
+                    toml_error(
+                        k == K_TINT
+                            ? "Invalid color (expected #RRGGBBAA) for key: "
+                            : "Invalid color (expected #RRGGBB or "
+                              "#RRGGBBAA) for key: ",
+                        entries[i].key);
                 break;
         }
     }
@@ -1105,6 +1147,10 @@ minilock_init(int argc, char *argv[])
     else if (state.img)
     {
         image_tint(state.img, CONFIG.image.tint_argb);
+        if (CONFIG.image.blur.enable)
+        {
+            image_blur(state.img, &CONFIG.image.blur);
+        }
         if (state.img->patches && !anim_src_init(&state))
         {
             fprintf(stderr, "Out of memory, using the background color\n");
@@ -1119,7 +1165,8 @@ minilock_init(int argc, char *argv[])
         return 1;
     }
 
-    /* Before the registry roundtrip: the keymap can arrive any time after it. */
+    /* Before the registry roundtrip: the keymap can arrive any time after it.
+     */
     state.xkb_ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
 
     state.registry = wl_display_get_registry(state.display);
