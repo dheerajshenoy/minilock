@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(minilock C)
+project(minilock VERSION 0.1.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -87,6 +87,7 @@ if(IMG_WEBP_FOUND AND IMG_WEBPDEMUX_FOUND)
 endif()
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE PROJECT_NAME="${PROJECT_NAME}")
+target_compile_definitions(${PROJECT_NAME} PRIVATE PROJECT_VERSION="${PROJECT_VERSION}")
 
 target_include_directories(${PROJECT_NAME} PRIVATE
   ${GEN_DIR} ${WAYLAND_CLIENT_INCLUDE_DIRS} ${XKBCOMMON_INCLUDE_DIRS})
