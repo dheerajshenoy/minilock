@@ -61,6 +61,7 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 add_executable(${PROJECT_NAME}
   src/main.c
+  src/minilock.c
   src/decoder.c
   ${GEN_DIR}/ext-session-lock-v1-client-protocol.h
   ${GEN_DIR}/ext-session-lock-v1-protocol.c

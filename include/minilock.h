@@ -4,6 +4,9 @@
 #include "ext-session-lock-v1-client-protocol.h"
 
 #include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <wayland-client.h>
 
 struct state; /* forward declaration */
@@ -37,4 +40,9 @@ struct state
     char password[256];
     size_t pw_len;
     bool authenticated;
+
+    struct image *img;
 };
+
+int
+init(int argc, char *argv[]);
