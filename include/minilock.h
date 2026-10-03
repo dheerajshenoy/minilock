@@ -11,6 +11,15 @@
 
 struct state; /* forward declaration */
 
+/* One persistently-mapped shm buffer. */
+struct shm_buf
+{
+    struct wl_buffer *buf;
+    uint32_t *px;
+    size_t size;
+    bool busy; /* attached and not yet released by the compositor */
+};
+
 struct output
 {
     struct wl_output *wl_output;
@@ -19,6 +28,8 @@ struct output
     struct state *state;
     struct wl_surface *surface;
     struct ext_session_lock_surface_v1 *lock_surface;
+    uint32_t width, height;
+    struct shm_buf bufs[2]; /* double buffered so animation can reuse them */
 };
 
 struct state

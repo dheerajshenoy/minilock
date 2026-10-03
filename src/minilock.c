@@ -10,7 +10,9 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/mman.h>
+#include <errno.h>
 #include <sys/poll.h>
+#include <sys/timerfd.h>
 #include <time.h>
 #include <unistd.h>
 #include <xkbcommon/xkbcommon.h>
@@ -92,10 +94,16 @@ free_image(struct state *state)
 {
     if (!state->img)
         return;
-    free(state->img->data);
-#ifdef HAVE_GIF
+    if (state->img->frames)
+    {
+        /* data aliases frames[0] */
+        for (int i = 0; i < state->img->n_frames; i++)
+            free(state->img->frames[i]);
+        free(state->img->frames);
+    }
+    else
+        free(state->img->data);
     free(state->img->delay_ms);
-#endif
     free(state->img);
     state->img = NULL;
 }
@@ -126,76 +134,123 @@ static const struct ext_session_lock_v1_listener lock_listener = {
 static void
 buffer_release(void *data, struct wl_buffer *buf)
 {
-    wl_buffer_destroy(buf);
+    struct shm_buf *b = data;
+    b->busy           = false;
 }
 
 static const struct wl_buffer_listener buffer_listener = {
     .release = buffer_release,
 };
 
-static struct wl_buffer *
-create_buffer(struct state *s, uint32_t w, uint32_t h)
+static bool
+shm_buf_create(struct state *s, struct shm_buf *b, uint32_t w, uint32_t h)
 {
     int stride = w * 4;
-    int size   = stride * h;
+    size_t size = (size_t)stride * h;
 
     int fd = memfd_create(PROJECT_NAME "-buf", 0);
     if (fd < 0 || ftruncate(fd, size) < 0)
     {
         perror("shm");
-        exit(1);
+        if (fd >= 0)
+            close(fd);
+        return false;
     }
 
     uint32_t *px = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (px == MAP_FAILED)
     {
         perror("mmap");
-        exit(1);
+        close(fd);
+        return false;
     }
-
-    const struct image *img = s->img;
-    if (img && img->data && img->w && img->h)
-    {
-        /* Scale to cover the output, centered, nearest-neighbour. */
-        uint64_t sw = w, sh = h;
-        bool wide   = sw * img->h > sh * img->w;
-        uint64_t dw = wide ? sw : (sh * img->w + img->h - 1) / img->h;
-        uint64_t dh = wide ? (sw * img->h + img->w - 1) / img->w : sh;
-        int64_t ox  = ((int64_t)dw - (int64_t)w) / 2;
-        int64_t oy  = ((int64_t)dh - (int64_t)h) / 2;
-
-        for (uint32_t y = 0; y < h; y++)
-        {
-            uint64_t sy = (uint64_t)(y + oy) * img->h / dh;
-            if (sy >= img->h)
-                sy = img->h - 1;
-            const uint32_t *src
-                = (const uint32_t *)((const char *)img->data + sy * img->stride);
-            for (uint32_t x = 0; x < w; x++)
-            {
-                uint64_t sx = (uint64_t)(x + ox) * img->w / dw;
-                if (sx >= img->w)
-                    sx = img->w - 1;
-                px[(size_t)y * w + x] = src[sx];
-            }
-        }
-    }
-    else
-    {
-        for (uint32_t i = 0; i < w * h; i++)
-            px[i] = 0xFF1E1E2E; /* ARGB: opaque dark blue-gray */
-    }
-
-    munmap(px, size);
 
     struct wl_shm_pool *pool = wl_shm_create_pool(s->shm, fd, size);
-    struct wl_buffer *buf    = wl_shm_pool_create_buffer(
-        pool, 0, w, h, stride, WL_SHM_FORMAT_ARGB8888);
+    b->buf = wl_shm_pool_create_buffer(pool, 0, w, h, stride,
+                                       WL_SHM_FORMAT_ARGB8888);
     wl_shm_pool_destroy(pool);
     close(fd);
 
-    wl_buffer_add_listener(buf, &buffer_listener, NULL);
-    return buf;
+    b->px   = px;
+    b->size = size;
+    b->busy = false;
+    wl_buffer_add_listener(b->buf, &buffer_listener, b);
+    return true;
+}
+
+static void
+shm_buf_destroy(struct shm_buf *b)
+{
+    if (b->buf)
+        wl_buffer_destroy(b->buf);
+    if (b->px)
+        munmap(b->px, b->size);
+    memset(b, 0, sizeof(*b));
+}
+
+/* Draw the current frame scaled to cover w x h, centered (nearest). */
+static void
+draw_image(uint32_t *px, uint32_t w, uint32_t h, const struct image *img)
+{
+    const uint32_t *frame = img ? image_frame(img, img->current_frame) : NULL;
+    uint32_t *xmap        = frame && img->w && img->h ? malloc(w * sizeof(*xmap)) : NULL;
+    if (!xmap)
+    {
+        for (size_t i = 0; i < (size_t)w * h; i++)
+            px[i] = 0xFF1E1E2E; /* ARGB: opaque dark blue-gray */
+        return;
+    }
+
+    uint64_t sw = w, sh = h;
+    bool wide   = sw * img->h > sh * img->w;
+    uint64_t dw = wide ? sw : (sh * img->w + img->h - 1) / img->h;
+    uint64_t dh = wide ? (sw * img->h + img->w - 1) / img->w : sh;
+    int64_t ox  = ((int64_t)dw - (int64_t)w) / 2;
+    int64_t oy  = ((int64_t)dh - (int64_t)h) / 2;
+
+    for (uint32_t x = 0; x < w; x++)
+    {
+        uint64_t sx = (uint64_t)(x + ox) * img->w / dw;
+        xmap[x]     = sx >= img->w ? img->w - 1 : sx;
+    }
+
+    for (uint32_t y = 0; y < h; y++)
+    {
+        uint64_t sy = (uint64_t)(y + oy) * img->h / dh;
+        if (sy >= img->h)
+            sy = img->h - 1;
+        const uint32_t *src = (const uint32_t *)((const char *)frame
+                                                 + sy * img->stride);
+        uint32_t *dst = px + (size_t)y * w;
+        for (uint32_t x = 0; x < w; x++)
+            dst[x] = src[xmap[x]];
+    }
+    free(xmap);
+}
+
+/* Render the current frame into a free buffer and commit it. */
+static void
+render_output(struct output *o)
+{
+    if (!o->width || !o->height)
+        return;
+
+    struct shm_buf *b = NULL;
+    for (int i = 0; i < 2 && !b; i++)
+        if (!o->bufs[i].busy)
+            b = &o->bufs[i];
+    if (!b)
+        return; /* compositor still holds both; skip this frame */
+
+    if (!b->buf && !shm_buf_create(o->state, b, o->width, o->height))
+        return;
+
+    draw_image(b->px, o->width, o->height, o->state->img);
+
+    b->busy = true;
+    wl_surface_attach(o->surface, b->buf, 0, 0);
+    wl_surface_damage_buffer(o->surface, 0, 0, o->width, o->height);
+    wl_surface_commit(o->surface);
 }
 
 static void
@@ -206,10 +261,14 @@ surface_configure(void *data, struct ext_session_lock_surface_v1 *ls,
 
     ext_session_lock_surface_v1_ack_configure(ls, serial);
 
-    struct wl_buffer *buf = create_buffer(o->state, w, h);
-    wl_surface_attach(o->surface, buf, 0, 0);
-    wl_surface_damage_buffer(o->surface, 0, 0, w, h);
-    wl_surface_commit(o->surface);
+    if (w != o->width || h != o->height)
+    {
+        shm_buf_destroy(&o->bufs[0]);
+        shm_buf_destroy(&o->bufs[1]);
+        o->width  = w;
+        o->height = h;
+    }
+    render_output(o);
 }
 
 static const struct ext_session_lock_surface_v1_listener surface_listener = {
@@ -417,6 +476,17 @@ static const struct wl_registry_listener registry_listener = {
     .global_remove = handle_global_remove,
 };
 
+static void
+arm_timer(int fd, float ms)
+{
+    struct itimerspec its = {0};
+    its.it_value.tv_sec   = (time_t)(ms / 1000);
+    its.it_value.tv_nsec  = (long)(ms - its.it_value.tv_sec * 1000) * 1000000L;
+    if (!its.it_value.tv_sec && !its.it_value.tv_nsec)
+        its.it_value.tv_nsec = 1; /* all-zero would disarm the timer */
+    timerfd_settime(fd, 0, &its, NULL);
+}
+
 int
 minilock_init(int argc, char *argv[])
 {
@@ -500,17 +570,61 @@ minilock_init(int argc, char *argv[])
     wl_display_roundtrip(state.display);
     printf("Locked. Enter your password.\n");
 
+    /* Frame timer, only for animated images. */
+    struct image *img = state.img;
+    int tfd           = -1;
+    if (img && img->n_frames > 1 && img->delay_ms)
+    {
+        tfd = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
+        if (tfd >= 0)
+            arm_timer(tfd, img->delay_ms[img->current_frame]);
+    }
+
     time_t end = time(NULL) + 60; /* temporary safety timeout */
     while (!state.authenticated && time(NULL) < end)
     {
-        wl_display_flush(state.display);
-        struct pollfd pfd = {wl_display_get_fd(state.display), POLLIN, 0};
-        if (poll(&pfd, 1, 500) > 0)
+        while (wl_display_prepare_read(state.display) != 0)
+            wl_display_dispatch_pending(state.display);
+        if (wl_display_flush(state.display) < 0 && errno != EAGAIN)
         {
-            if (wl_display_dispatch(state.display) < 0)
+            wl_display_cancel_read(state.display);
+            break;
+        }
+
+        struct pollfd pfds[2] = {
+            {wl_display_get_fd(state.display), POLLIN, 0},
+            {tfd, POLLIN, 0}, /* a negative fd is ignored by poll */
+        };
+        if (poll(pfds, 2, 500) <= 0)
+        {
+            wl_display_cancel_read(state.display);
+            continue;
+        }
+
+        if (pfds[0].revents & POLLIN)
+        {
+            if (wl_display_read_events(state.display) < 0)
                 break;
         }
+        else
+            wl_display_cancel_read(state.display);
+        if (wl_display_dispatch_pending(state.display) < 0)
+            break;
+
+        if (tfd >= 0 && (pfds[1].revents & POLLIN))
+        {
+            uint64_t expirations;
+            if (read(tfd, &expirations, sizeof(expirations)) > 0)
+            {
+                img->current_frame = (img->current_frame + 1) % img->n_frames;
+                arm_timer(tfd, img->delay_ms[img->current_frame]);
+                for (struct output *o = state.outputs; o; o = o->next)
+                    render_output(o);
+            }
+        }
     }
+    if (tfd >= 0)
+        close(tfd);
 
     ext_session_lock_v1_unlock_and_destroy(state.lock);
     wl_display_roundtrip(state.display); /* flush the unlock request */

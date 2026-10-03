@@ -8,14 +8,21 @@ struct image
 {
     uint32_t w, h;
     uint32_t stride;
-    void *data;
+    void *data; /* first (or only) frame; aliases frames[0] if animated */
 
-#ifdef HAVE_GIF
+    /* Animation: stays NULL/0 for still images. Each frame is a full-canvas
+     * XRGB buffer of stride * h bytes, already composited. */
+    uint32_t **frames;
     int n_frames;
     int current_frame;
-    float *delay_ms;
-#endif
+    float *delay_ms; /* per-frame delay in milliseconds */
 };
+
+static inline const uint32_t *
+image_frame(const struct image *img, int i)
+{
+    return img->frames ? img->frames[i] : img->data;
+}
 
 #ifdef HAVE_JPEG
     #include <jpeglib.h>

@@ -611,10 +611,29 @@ out:
 }
 
 #ifdef HAVE_GIF
+/* Stored row r of an interlaced image -> its real row. */
+static int
+gif_interlaced_row(int r, int h)
+{
+    static const int off[4] = {0, 4, 2, 1}, step[4] = {8, 8, 4, 2};
+    for (int p = 0; p < 4; p++)
+    {
+        int n = h > off[p] ? (h - off[p] + step[p] - 1) / step[p] : 0;
+        if (r < n)
+            return off[p] + r * step[p];
+        r -= n;
+    }
+    return h - 1;
+}
+
 bool
 load_gif(const char *path, struct image *img)
 {
+    const uint32_t bg           = 0xFF1E1E2E;
+    const size_t max_total_bytes = 512u << 20; /* cap on decoded frames */
+
     int err;
+    uint32_t *canvas = NULL, *prev = NULL;
     GifFileType *gif = DGifOpenFileName(path, &err);
     if (!gif)
     {
@@ -638,72 +657,124 @@ load_gif(const char *path, struct image *img)
     img->w      = gif->SWidth;
     img->h      = gif->SHeight;
     img->stride = img->w * 4;
-    img->data   = malloc((size_t)img->stride * img->h);
-    img->n_frames      = gif->ImageCount;
-    img->current_frame = 0;
-    img->delay_ms      = calloc(img->n_frames, sizeof(float));
-    if (!img->data || !img->delay_ms)
+
+    size_t frame_bytes = (size_t)img->stride * img->h;
+    int n              = gif->ImageCount;
+    if ((size_t)n * frame_bytes > max_total_bytes)
+    {
+        n = max_total_bytes / frame_bytes;
+        if (n < 1)
+            n = 1;
+        fprintf(stderr, "GIF: too large, keeping first %d of %d frames\n", n,
+                gif->ImageCount);
+    }
+
+    img->frames   = calloc(n, sizeof(*img->frames));
+    img->delay_ms = calloc(n, sizeof(float));
+    canvas        = malloc(frame_bytes);
+    prev          = malloc(frame_bytes);
+    if (!img->frames || !img->delay_ms || !canvas || !prev)
     {
         fprintf(stderr, "Failed to allocate memory for image\n");
         goto fail;
     }
+    img->n_frames      = n;
+    img->current_frame = 0;
 
-    /* Frame delays (in ms). A frame without a graphics control block is
-     * legal and just has no delay or transparency. */
-    int transparent = NO_TRANSPARENT_COLOR;
-    for (int i = 0; i < gif->ImageCount; i++)
+    size_t npx = (size_t)img->w * img->h;
+    for (size_t i = 0; i < npx; i++)
+        canvas[i] = bg;
+
+    for (int i = 0; i < n; i++)
     {
-        GraphicsControlBlock gcb;
-        if (DGifSavedExtensionToGCB(gif, i, &gcb) == GIF_OK)
+        /* A frame without a graphics control block is legal. */
+        GraphicsControlBlock gcb = {.DisposalMode    = DISPOSAL_UNSPECIFIED,
+                                    .UserInputFlag   = false,
+                                    .DelayTime       = 0,
+                                    .TransparentColor = NO_TRANSPARENT_COLOR};
+        (void)DGifSavedExtensionToGCB(gif, i, &gcb);
+
+        /* Like browsers, treat 0/10 ms delays as 100 ms. */
+        img->delay_ms[i] = gcb.DelayTime <= 1 ? 100.0f : gcb.DelayTime * 10.0f;
+
+        const SavedImage *frame = &gif->SavedImages[i];
+        const GifImageDesc *d   = &frame->ImageDesc;
+        const ColorMapObject *cmap = d->ColorMap ? d->ColorMap : gif->SColorMap;
+        if (!cmap || !frame->RasterBits)
         {
-            img->delay_ms[i] = gcb.DelayTime * 10.0f;
-            if (i == 0)
-                transparent = gcb.TransparentColor;
+            fprintf(stderr, "GIF: frame %d has no color map or pixels\n", i);
+            goto fail;
         }
-    }
 
-    /* Only the first frame is drawn, over an opaque fallback background. */
-    const uint32_t bg = 0xFF1E1E2E;
-    uint32_t *px      = img->data;
-    for (size_t i = 0; i < (size_t)img->w * img->h; i++)
-        px[i] = bg;
+        if (gcb.DisposalMode == DISPOSE_PREVIOUS)
+            memcpy(prev, canvas, frame_bytes);
 
-    const SavedImage *frame = &gif->SavedImages[0];
-    const ColorMapObject *cmap
-        = frame->ImageDesc.ColorMap ? frame->ImageDesc.ColorMap : gif->SColorMap;
-    if (!cmap || !frame->RasterBits)
-    {
-        fprintf(stderr, "GIF: frame has no color map or pixels\n");
-        goto fail;
-    }
-
-    for (int y = 0; y < frame->ImageDesc.Height; y++)
-    {
-        int dy = frame->ImageDesc.Top + y;
-        if (dy < 0 || dy >= (int)img->h)
-            continue;
-        for (int x = 0; x < frame->ImageDesc.Width; x++)
+        for (int r = 0; r < d->Height; r++)
         {
-            int dx = frame->ImageDesc.Left + x;
-            if (dx < 0 || dx >= (int)img->w)
+            int row = d->Interlace ? gif_interlaced_row(r, d->Height) : r;
+            int dy  = d->Top + row;
+            if (dy < 0 || dy >= (int)img->h)
                 continue;
-            int c = frame->RasterBits[(size_t)y * frame->ImageDesc.Width + x];
-            if (c == transparent || c >= cmap->ColorCount)
-                continue;
-            const GifColorType *col = &cmap->Colors[c];
-            px[(size_t)dy * img->w + dx] = 0xFF000000u | col->Red << 16
-                                           | col->Green << 8 | col->Blue;
+            for (int x = 0; x < d->Width; x++)
+            {
+                int dx = d->Left + x;
+                if (dx < 0 || dx >= (int)img->w)
+                    continue;
+                int c = frame->RasterBits[(size_t)r * d->Width + x];
+                if (c == gcb.TransparentColor || c >= cmap->ColorCount)
+                    continue;
+                const GifColorType *col = &cmap->Colors[c];
+                canvas[(size_t)dy * img->w + dx] = 0xFF000000u | col->Red << 16
+                                                   | col->Green << 8 | col->Blue;
+            }
         }
+
+        img->frames[i] = malloc(frame_bytes);
+        if (!img->frames[i])
+        {
+            fprintf(stderr, "Failed to allocate memory for image\n");
+            goto fail;
+        }
+        memcpy(img->frames[i], canvas, frame_bytes);
+
+        /* Apply this frame's disposal before the next one is drawn. */
+        if (gcb.DisposalMode == DISPOSE_BACKGROUND)
+        {
+            for (int r = 0; r < d->Height; r++)
+            {
+                int dy = d->Top + r;
+                if (dy < 0 || dy >= (int)img->h)
+                    continue;
+                for (int x = 0; x < d->Width; x++)
+                {
+                    int dx = d->Left + x;
+                    if (dx >= 0 && dx < (int)img->w)
+                        canvas[(size_t)dy * img->w + dx] = bg;
+                }
+            }
+        }
+        else if (gcb.DisposalMode == DISPOSE_PREVIOUS)
+            memcpy(canvas, prev, frame_bytes);
     }
 
+    img->data = img->frames[0];
+    free(canvas);
+    free(prev);
     DGifCloseFile(gif, &err);
     return true;
 
 fail:
+    if (img->frames)
+        for (int i = 0; i < img->n_frames; i++)
+            free(img->frames[i]);
+    free(img->frames);
     free(img->delay_ms);
-    free(img->data);
+    img->frames   = NULL;
     img->delay_ms = NULL;
     img->data     = NULL;
+    img->n_frames = 0;
+    free(canvas);
+    free(prev);
     DGifCloseFile(gif, &err);
     return false;
 }
