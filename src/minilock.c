@@ -92,19 +92,7 @@ load_image(const char *path, struct state *state)
 void
 free_image(struct state *state)
 {
-    if (!state->img)
-        return;
-    if (state->img->frames)
-    {
-        /* data aliases frames[0] */
-        for (int i = 0; i < state->img->n_frames; i++)
-            free(state->img->frames[i]);
-        free(state->img->frames);
-    }
-    else
-        free(state->img->data);
-    free(state->img->delay_ms);
-    free(state->img);
+    image_free(state->img);
     state->img = NULL;
 }
 
@@ -188,19 +176,12 @@ shm_buf_destroy(struct shm_buf *b)
     memset(b, 0, sizeof(*b));
 }
 
-/* Draw the current frame scaled to cover w x h, centered (nearest). */
+/* Scale-to-cover mapping: for each output column/row, the image column/row
+ * it shows. The image is centered and cropped, keeping its aspect ratio. */
 static void
-draw_image(uint32_t *px, uint32_t w, uint32_t h, const struct image *img)
+build_maps(uint32_t w, uint32_t h, const struct image *img, uint32_t *xmap,
+           uint32_t *ymap)
 {
-    const uint32_t *frame = img ? image_frame(img, img->current_frame) : NULL;
-    uint32_t *xmap        = frame && img->w && img->h ? malloc(w * sizeof(*xmap)) : NULL;
-    if (!xmap)
-    {
-        for (size_t i = 0; i < (size_t)w * h; i++)
-            px[i] = 0xFF1E1E2E; /* ARGB: opaque dark blue-gray */
-        return;
-    }
-
     uint64_t sw = w, sh = h;
     bool wide   = sw * img->h > sh * img->w;
     uint64_t dw = wide ? sw : (sh * img->w + img->h - 1) / img->h;
@@ -213,43 +194,220 @@ draw_image(uint32_t *px, uint32_t w, uint32_t h, const struct image *img)
         uint64_t sx = (uint64_t)(x + ox) * img->w / dw;
         xmap[x]     = sx >= img->w ? img->w - 1 : sx;
     }
-
     for (uint32_t y = 0; y < h; y++)
     {
         uint64_t sy = (uint64_t)(y + oy) * img->h / dh;
-        if (sy >= img->h)
-            sy = img->h - 1;
-        const uint32_t *src = (const uint32_t *)((const char *)frame
-                                                 + sy * img->stride);
+        ymap[y]     = sy >= img->h ? img->h - 1 : sy;
+    }
+}
+
+/* Still image (or solid color): draw it into px. */
+static void
+draw_image(uint32_t *px, uint32_t w, uint32_t h, const struct image *img)
+{
+    uint32_t *maps = img && img->data && img->w && img->h
+                         ? malloc(((size_t)w + h) * sizeof(*maps))
+                         : NULL;
+    if (!maps)
+    {
+        for (size_t i = 0; i < (size_t)w * h; i++)
+            px[i] = IMAGE_BG;
+        return;
+    }
+    uint32_t *xmap = maps, *ymap = maps + w;
+    build_maps(w, h, img, xmap, ymap);
+
+    for (uint32_t y = 0; y < h; y++)
+    {
+        const uint32_t *src
+            = (const uint32_t *)((const char *)img->data
+                                 + (size_t)ymap[y] * img->stride);
         uint32_t *dst = px + (size_t)y * w;
         for (uint32_t x = 0; x < w; x++)
             dst[x] = src[xmap[x]];
     }
-    free(xmap);
+    free(maps);
 }
 
-/* Render the current frame into a free buffer and commit it. */
+/* ---- animation: patches composited onto an output-sized canvas ---- */
+
+static void
+dirty_add(struct output *o, int x0, int y0, int x1, int y1)
+{
+    if (o->dirty_x1 <= o->dirty_x0) /* currently empty */
+    {
+        o->dirty_x0 = x0;
+        o->dirty_y0 = y0;
+        o->dirty_x1 = x1;
+        o->dirty_y1 = y1;
+        return;
+    }
+    if (x0 < o->dirty_x0) o->dirty_x0 = x0;
+    if (y0 < o->dirty_y0) o->dirty_y0 = y0;
+    if (x1 > o->dirty_x1) o->dirty_x1 = x1;
+    if (y1 > o->dirty_y1) o->dirty_y1 = y1;
+}
+
+/* Output-space rectangle showing patch p. maps are monotonic, so the output
+ * columns/rows that map into [left, left+w) form one contiguous range. */
+static bool
+patch_bbox(const struct output *o, const struct frame_patch *p, int *bx0,
+           int *by0, int *bx1, int *by1)
+{
+    if (!p->w || !p->h)
+        return false;
+    int x0 = 0, y0 = 0;
+    while (x0 < (int)o->width && (int)o->xmap[x0] < p->left)
+        x0++;
+    int x1 = x0;
+    while (x1 < (int)o->width && (int)o->xmap[x1] < p->left + p->w)
+        x1++;
+    while (y0 < (int)o->height && (int)o->ymap[y0] < p->top)
+        y0++;
+    int y1 = y0;
+    while (y1 < (int)o->height && (int)o->ymap[y1] < p->top + p->h)
+        y1++;
+    *bx0 = x0; *by0 = y0; *bx1 = x1; *by1 = y1;
+    return x1 > x0 && y1 > y0;
+}
+
+/* Draw patch p onto the canvas, or clear its rectangle to the background. */
+static void
+patch_paint(struct output *o, const struct frame_patch *p, bool clear)
+{
+    int x0, y0, x1, y1;
+    if (!patch_bbox(o, p, &x0, &y0, &x1, &y1))
+        return;
+
+    for (int y = y0; y < y1; y++)
+    {
+        const uint8_t *row = p->idx + (size_t)(o->ymap[y] - p->top) * p->w;
+        uint32_t *dst      = o->canvas + (size_t)y * o->width;
+        for (int x = x0; x < x1; x++)
+        {
+            uint8_t c = row[o->xmap[x] - p->left];
+            if (clear)
+                dst[x] = IMAGE_BG;
+            else if (c != p->transparent)
+                dst[x] = p->pal[c];
+        }
+    }
+    dirty_add(o, x0, y0, x1, y1);
+}
+
+/* Advance the canvas from the frame shown so far to frame k. */
+static void
+anim_step(struct output *o, int k)
+{
+    const struct image *img = o->state->img;
+    size_t px               = (size_t)o->width * o->height;
+
+    if (o->shown >= 0)
+    {
+        const struct frame_patch *old = &img->patches[o->shown];
+        if (old->disposal == FRAME_CLEAR)
+            patch_paint(o, old, true);
+        else if (old->disposal == FRAME_RESTORE)
+        {
+            int x0, y0, x1, y1;
+            memcpy(o->canvas, o->prev, px * sizeof(*o->canvas));
+            if (patch_bbox(o, old, &x0, &y0, &x1, &y1))
+                dirty_add(o, x0, y0, x1, y1);
+        }
+    }
+
+    if (k == 0) /* (re)starting the loop */
+    {
+        for (size_t i = 0; i < px; i++)
+            o->canvas[i] = IMAGE_BG;
+        dirty_add(o, 0, 0, o->width, o->height);
+    }
+
+    const struct frame_patch *p = &img->patches[k];
+    if (p->disposal == FRAME_RESTORE)
+        memcpy(o->prev, o->canvas, px * sizeof(*o->canvas));
+    patch_paint(o, p, false);
+    o->shown = k;
+}
+
+static void
+anim_teardown(struct output *o)
+{
+    free(o->canvas);
+    free(o->prev);
+    free(o->xmap);
+    free(o->ymap);
+    o->canvas = o->prev = o->xmap = o->ymap = NULL;
+    o->shown                                = -1;
+}
+
+/* Allocate this output's canvas and catch it up to the current frame. */
+static void
+anim_setup(struct output *o)
+{
+    const struct image *img = o->state->img;
+    anim_teardown(o);
+
+    size_t px = (size_t)o->width * o->height;
+    o->canvas = malloc(px * sizeof(*o->canvas));
+    o->prev   = malloc(px * sizeof(*o->prev));
+    o->xmap   = malloc(o->width * sizeof(*o->xmap));
+    o->ymap   = malloc(o->height * sizeof(*o->ymap));
+    if (!o->canvas || !o->prev || !o->xmap || !o->ymap)
+    {
+        anim_teardown(o);
+        return;
+    }
+
+    build_maps(o->width, o->height, img, o->xmap, o->ymap);
+    for (size_t i = 0; i < px; i++)
+        o->canvas[i] = IMAGE_BG;
+    for (int k = 0; k <= img->current_frame; k++)
+        anim_step(o, k);
+    o->dirty_x0 = o->dirty_y0 = 0;
+    o->dirty_x1 = o->width;
+    o->dirty_y1 = o->height;
+}
+
+/* Render into a free buffer and commit it, damaging only what changed. */
 static void
 render_output(struct output *o)
 {
     if (!o->width || !o->height)
         return;
 
+    bool animated = o->canvas != NULL;
+    if (animated && o->dirty_x1 <= o->dirty_x0)
+        return; /* nothing changed since the last present */
+
     struct shm_buf *b = NULL;
     for (int i = 0; i < 2 && !b; i++)
         if (!o->bufs[i].busy)
             b = &o->bufs[i];
     if (!b)
-        return; /* compositor still holds both; skip this frame */
+        return; /* compositor still holds both; dirty area is kept */
 
     if (!b->buf && !shm_buf_create(o->state, b, o->width, o->height))
         return;
 
-    draw_image(b->px, o->width, o->height, o->state->img);
+    int dx = 0, dy = 0, dw = o->width, dh = o->height;
+    if (animated)
+    {
+        /* The buffer may be a frame behind, so copy the whole canvas; only
+         * the damage hint is limited to the changed rectangle. */
+        memcpy(b->px, o->canvas, b->size);
+        dx = o->dirty_x0;
+        dy = o->dirty_y0;
+        dw = o->dirty_x1 - o->dirty_x0;
+        dh = o->dirty_y1 - o->dirty_y0;
+        o->dirty_x0 = o->dirty_y0 = o->dirty_x1 = o->dirty_y1 = 0;
+    }
+    else
+        draw_image(b->px, o->width, o->height, o->state->img);
 
     b->busy = true;
     wl_surface_attach(o->surface, b->buf, 0, 0);
-    wl_surface_damage_buffer(o->surface, 0, 0, o->width, o->height);
+    wl_surface_damage_buffer(o->surface, dx, dy, dw, dh);
     wl_surface_commit(o->surface);
 }
 
@@ -267,6 +425,14 @@ surface_configure(void *data, struct ext_session_lock_surface_v1 *ls,
         shm_buf_destroy(&o->bufs[1]);
         o->width  = w;
         o->height = h;
+        if (o->state->img && o->state->img->patches)
+            anim_setup(o);
+    }
+    else if (o->canvas)
+    {
+        o->dirty_x0 = o->dirty_y0 = 0;
+        o->dirty_x1 = w;
+        o->dirty_y1 = h;
     }
     render_output(o);
 }
@@ -573,11 +739,11 @@ minilock_init(int argc, char *argv[])
     /* Frame timer, only for animated images. */
     struct image *img = state.img;
     int tfd           = -1;
-    if (img && img->n_frames > 1 && img->delay_ms)
+    if (img && img->n_frames > 1 && img->patches)
     {
         tfd = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
         if (tfd >= 0)
-            arm_timer(tfd, img->delay_ms[img->current_frame]);
+            arm_timer(tfd, img->patches[img->current_frame].delay_ms);
     }
 
     time_t end = time(NULL) + 60; /* temporary safety timeout */
@@ -617,9 +783,13 @@ minilock_init(int argc, char *argv[])
             if (read(tfd, &expirations, sizeof(expirations)) > 0)
             {
                 img->current_frame = (img->current_frame + 1) % img->n_frames;
-                arm_timer(tfd, img->delay_ms[img->current_frame]);
+                arm_timer(tfd, img->patches[img->current_frame].delay_ms);
                 for (struct output *o = state.outputs; o; o = o->next)
+                {
+                    if (o->canvas)
+                        anim_step(o, img->current_frame);
                     render_output(o);
+                }
             }
         }
     }

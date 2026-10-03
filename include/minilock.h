@@ -30,6 +30,13 @@ struct output
     struct ext_session_lock_surface_v1 *lock_surface;
     uint32_t width, height;
     struct shm_buf bufs[2]; /* double buffered so animation can reuse them */
+
+    /* Animation state, at this output's resolution (NULL for still images). */
+    uint32_t *canvas;       /* the picture after drawing frame `shown` */
+    uint32_t *prev;         /* saved canvas for FRAME_RESTORE */
+    uint32_t *xmap, *ymap;  /* output column/row -> image column/row */
+    int shown;              /* frame currently composited, -1 for none */
+    int dirty_x0, dirty_y0, dirty_x1, dirty_y1; /* not yet presented */
 };
 
 struct state

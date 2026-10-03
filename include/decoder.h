@@ -4,25 +4,42 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#define IMAGE_BG 0xFF1E1E2Eu /* opaque fallback / disposal background */
+
+enum frame_disposal
+{
+    FRAME_KEEP,    /* leave the canvas as is */
+    FRAME_CLEAR,   /* clear the patch rectangle to the background */
+    FRAME_RESTORE, /* restore the canvas from before this frame */
+};
+
+/* One animation frame, kept as the small rectangle it changes (not as a
+ * full canvas) and composited on demand by the renderer. */
+struct frame_patch
+{
+    int left, top, w, h; /* rectangle on the canvas, already clipped to it */
+    uint8_t *idx;        /* w*h palette indices, rows in display order */
+    uint32_t *pal;       /* 256 ARGB entries */
+    int transparent;     /* palette index to skip, or -1 */
+    enum frame_disposal disposal;
+    float delay_ms;
+};
+
 struct image
 {
     uint32_t w, h;
     uint32_t stride;
-    void *data; /* first (or only) frame; aliases frames[0] if animated */
+    void *data; /* XRGB canvas for still images; NULL for animations */
 
-    /* Animation: stays NULL/0 for still images. Each frame is a full-canvas
-     * XRGB buffer of stride * h bytes, already composited. */
-    uint32_t **frames;
+    /* Animation (NULL/0 for stills). */
+    struct frame_patch *patches;
     int n_frames;
     int current_frame;
-    float *delay_ms; /* per-frame delay in milliseconds */
 };
 
-static inline const uint32_t *
-image_frame(const struct image *img, int i)
-{
-    return img->frames ? img->frames[i] : img->data;
-}
+/* Free an image and everything it owns. */
+void
+image_free(struct image *img);
 
 #ifdef HAVE_JPEG
     #include <jpeglib.h>
