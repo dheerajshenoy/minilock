@@ -7,6 +7,19 @@ set(CMAKE_C_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Build type: default to Release when none is given (-DCMAKE_BUILD_TYPE=Debug).
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+  set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS Debug Release)
+endif()
+
+option(MINILOCK_SANITIZE "Build with AddressSanitizer and UBSan (Debug only)" OFF)
+
+# Debug: no optimization, full debug info, many warnings, DEBUG defined.
+set(CMAKE_C_FLAGS_DEBUG "-O0 -g3 -Wall -Wextra -DDEBUG")
+# Release: optimized, no asserts, stack protector and fortify as hardening.
+set(CMAKE_C_FLAGS_RELEASE "-O2 -DNDEBUG -fstack-protector-strong -D_FORTIFY_SOURCE=2")
+
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(WAYLAND_CLIENT REQUIRED wayland-client)
 pkg_check_modules(XKBCOMMON REQUIRED xkbcommon)
@@ -85,6 +98,13 @@ if(IMG_WEBP_FOUND AND IMG_WEBPDEMUX_FOUND)
   target_link_libraries(minilock PRIVATE ${IMG_WEBPDEMUX_LIBRARIES})
   message(STATUS "Animated WebP enabled")
 endif()
+
+if(MINILOCK_SANITIZE AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+  target_compile_options(${PROJECT_NAME} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+  target_link_options(${PROJECT_NAME} PRIVATE -fsanitize=address,undefined)
+endif()
+
+message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE PROJECT_NAME="${PROJECT_NAME}")
 target_compile_definitions(${PROJECT_NAME} PRIVATE PROJECT_VERSION="${PROJECT_VERSION}")
