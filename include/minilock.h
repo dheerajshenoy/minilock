@@ -32,6 +32,7 @@ struct output
     struct state *state;
     struct wl_surface *surface;
     struct ext_session_lock_surface_v1 *lock_surface;
+    uint32_t width, height;
 };
 
 struct state
@@ -52,30 +53,7 @@ struct state
     char password[256];
     size_t pw_len;
     bool authenticated;
-
-    uint32_t *img_px;
-    int img_w, img_h;
+    struct image img;
+    int cur_frame;
+    int64_t next_frame_ms;
 };
-
-static bool
-load_image(struct state *s, const char *path)
-{
-
-#ifdef HAVE_PNG
-    if (load_png(path, &s->img_px, &s->img_w, &s->img_h))
-        return true;
-#endif
-
-#ifdef HAVE_JPEG
-    if (load_jpeg(path, &s->img_px, &s->img_w, &s->img_h))
-        return true;
-#endif
-
-#ifdef HAVE_WEBP
-    if (load_webp(path, &s->img_px, &s->img_w, &s->img_h))
-        return true;
-#endif
-
-    fprintf(stderr, "Cannot load image (unsupported or invalid): %s\n", path);
-    return false;
-}

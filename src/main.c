@@ -69,8 +69,27 @@ static const struct ext_session_lock_v1_listener lock_listener = {
     .finished = lock_finished,
 };
 
+static int64_t
+now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* Free each buffer once the compositor is done with it. */
+static void
+buffer_release(void *data, struct wl_buffer *buf)
+{
+    wl_buffer_destroy(buf);
+}
+
+static const struct wl_buffer_listener buffer_listener = {
+    .release = buffer_release,
+};
+
 static struct wl_buffer *
-create_buffer(struct state *s, uint32_t width, uint32_t height)
+create_buffer(struct state *s, uint32_t width, uint32_t height, int frame)
 {
     int stride = width * 4;
     int size   = stride * height;
@@ -89,25 +108,27 @@ create_buffer(struct state *s, uint32_t width, uint32_t height)
         exit(1);
     }
 
-    if (s->img_px)
+    if (s->img.n_frames > 0)
     {
+        uint32_t *src = s->img.frames[frame];
+        int iw = s->img.w, ih = s->img.h;
+
         /* "Cover" scaling: fill the screen, crop the overflow. */
-        double scale
-            = fmax((double)width / s->img_w, (double)height / s->img_h);
-        double off_x = (s->img_w * scale - width) / 2.0;
-        double off_y = (s->img_h * scale - height) / 2.0;
+        double scale = fmax((double)width / iw, (double)height / ih);
+        double off_x = (iw * scale - width) / 2.0;
+        double off_y = (ih * scale - height) / 2.0;
 
         for (uint32_t y = 0; y < height; y++)
         {
             int sy = (int)((y + off_y) / scale);
-            if (sy >= s->img_h)
-                sy = s->img_h - 1;
+            if (sy >= ih)
+                sy = ih - 1;
             for (uint32_t x = 0; x < width; x++)
             {
                 int sx = (int)((x + off_x) / scale);
-                if (sx >= s->img_w)
-                    sx = s->img_w - 1;
-                px[y * width + x] = s->img_px[sy * s->img_w + sx];
+                if (sx >= iw)
+                    sx = iw - 1;
+                px[y * width + x] = src[sy * iw + sx];
             }
         }
     }
@@ -124,7 +145,21 @@ create_buffer(struct state *s, uint32_t width, uint32_t height)
         pool, 0, width, height, stride, WL_SHM_FORMAT_ARGB8888);
     wl_shm_pool_destroy(pool);
     close(fd);
+    wl_buffer_add_listener(buf, &buffer_listener, NULL);
     return buf;
+}
+
+static void
+draw_output(struct output *o)
+{
+    if (!o->width || !o->height)
+        return;
+
+    struct wl_buffer *buf
+        = create_buffer(o->state, o->width, o->height, o->state->cur_frame);
+    wl_surface_attach(o->surface, buf, 0, 0);
+    wl_surface_damage_buffer(o->surface, 0, 0, o->width, o->height);
+    wl_surface_commit(o->surface);
 }
 
 static void
@@ -132,12 +167,11 @@ surface_configure(void *data, struct ext_session_lock_surface_v1 *ls,
                   uint32_t serial, uint32_t width, uint32_t height)
 {
     struct output *o = data;
+    o->width         = width;
+    o->height        = height;
 
     ext_session_lock_surface_v1_ack_configure(ls, serial);
-
-    struct wl_buffer *buf = create_buffer(o->state, width, height);
-    wl_surface_attach(o->surface, buf, 0, 0);
-    wl_surface_commit(o->surface);
+    draw_output(o);
 }
 
 static const struct ext_session_lock_surface_v1_listener surface_listener = {
@@ -302,9 +336,8 @@ main(int argc, char *argv[])
 
     if (argc > 1)
     {
-        if (!load_image(&state, argv[1]))
+        if (!load_image(argv[1], &state.img))
             return 1;
-        printf("Loaded image: %dx%d\n", state.img_w, state.img_h);
     }
 
     state.display = wl_display_connect(NULL);
@@ -371,14 +404,37 @@ main(int argc, char *argv[])
     printf("Session locked!\n");
     wl_display_roundtrip(state.display);
 
+    bool animated = state.img.n_frames > 1;
+    if (animated)
+        state.next_frame_ms = now_ms() + state.img.delay_ms[0];
+
     printf("Locked. Enter your password.\n");
-    time_t end = time(NULL) + 10; /* temporary safety timeout */
+    time_t end = time(NULL) + 60; /* temporary safety timeout */
     while (!state.authenticated && time(NULL) < end)
     {
         wl_display_flush(state.display);
+
+        int timeout = 500;
+        if (animated)
+        {
+            int64_t wait = state.next_frame_ms - now_ms();
+            if (wait < 0)
+                wait = 0;
+            if (wait < timeout)
+                timeout = (int)wait;
+        }
+
         struct pollfd pfd = {wl_display_get_fd(state.display), POLLIN, 0};
-        if (poll(&pfd, 1, 500) > 0)
+        if (poll(&pfd, 1, timeout) > 0)
             wl_display_dispatch(state.display);
+
+        if (animated && now_ms() >= state.next_frame_ms)
+        {
+            state.cur_frame = (state.cur_frame + 1) % state.img.n_frames;
+            for (struct output *o = state.outputs; o; o = o->next)
+                draw_output(o);
+            state.next_frame_ms += state.img.delay_ms[state.cur_frame];
+        }
     }
 
     ext_session_lock_v1_unlock_and_destroy(state.lock);
@@ -387,7 +443,7 @@ main(int argc, char *argv[])
 
     wl_display_disconnect(state.display);
 
-    free(state.img_px);
+    image_free(&state.img);
 
     return 0;
 }

@@ -3,43 +3,15 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// PNG
-#ifdef HAVE_PNG
-    #include <png.h>
-
-bool
-load_png(const char *path, uint32_t **out, int *w, int *h);
-
-#endif
-
-// JPEG
-#ifdef HAVE_JPEG
-    #include <jpeglib.h>
-
-// libjpeg reports errors by calling exit() by default, which would kill the
-// locker. So we install our own error handler that jumps back with longjmp, the
-// same idea as PNG's setjmp.
-struct jpeg_err
+struct image
 {
-    struct jpeg_error_mgr pub;
-    jmp_buf jb;
+    int w, h;
+    int n_frames;
+    uint32_t **frames; /* n_frames full-size ARGB buffers */
+    int *delay_ms;     /* how long each frame is shown */
 };
 
-static void
-jpeg_err_exit(j_common_ptr cinfo)
-{
-    struct jpeg_err *e = (struct jpeg_err *)cinfo->err;
-    longjmp(e->jb, 1);
-}
-
 bool
-load_jpeg(const char *path, uint32_t **out, int *w, int *h);
-#endif
-
-// WEBP
-#ifdef HAVE_WEBP
-    #include <webp/decode.h>
-
-bool
-load_webp(const char *path, uint32_t **out, int *w, int *h);
-#endif
+load_image(const char *path, struct image *img);
+void
+image_free(struct image *img);
