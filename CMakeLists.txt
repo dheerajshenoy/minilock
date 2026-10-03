@@ -79,6 +79,7 @@ add_executable(${PROJECT_NAME}
   src/minilock.c
   src/decoder.c
   src/blur.c
+  src/cache.c
   src/tomlc17.c
   ${GEN_DIR}/ext-session-lock-v1-client-protocol.h
   ${GEN_DIR}/ext-session-lock-v1-protocol.c

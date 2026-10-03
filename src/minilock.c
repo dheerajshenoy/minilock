@@ -1,6 +1,7 @@
 #include "minilock.h"
 
 #include "blur.h"
+#include "cache.h"
 #include "config.h"
 #include "decoder.h"
 #include "tomlc17.h"
@@ -38,7 +39,6 @@ free_image(struct state *state)
     image_free(state->img);
     state->img = NULL;
 }
-
 
 bool
 load_image(const char *path, struct state *state)
@@ -937,6 +937,7 @@ parse_config(void)
         = {{"image.bgcolor", K_COLOR, &CONFIG.image.bgcolor},
            {"image.path", K_STRING, &CONFIG.image.path},
            {"image.smooth", K_BOOL, &CONFIG.image.smooth},
+           {"image.cache", K_BOOL, &CONFIG.image.cache},
            {"image.tint", K_TINT, &CONFIG.image.tint_argb},
            {"image.blur.enable", K_BOOL, &CONFIG.image.blur.enable},
            {"image.blur.radius", K_POS, &CONFIG.image.blur.radius},
@@ -1141,17 +1142,29 @@ minilock_init(int argc, char *argv[])
 
     /* If there's no image, or it fails to load, the background color is used
      * (still locking beats refusing to start). */
-    if (CONFIG.image.path && !load_image(CONFIG.image.path, &state))
-        fprintf(stderr, "Failed to load image %s, using the background color\n",
-                CONFIG.image.path);
-    else if (state.img)
+    if (CONFIG.image.path)
     {
-        image_tint(state.img, CONFIG.image.tint_argb);
-        if (CONFIG.image.blur.enable)
+        /* A cached copy already has the effects applied. */
+        if (CONFIG.image.cache)
+            state.img = cache_load(CONFIG.image.path, &CONFIG);
+
+        if (!state.img)
         {
-            image_blur(state.img, &CONFIG.image.blur);
+            if (!load_image(CONFIG.image.path, &state))
+                fprintf(stderr,
+                        "Failed to load image %s, using the background color\n",
+                        CONFIG.image.path);
+            else
+            {
+                image_tint(state.img, CONFIG.image.tint_argb);
+                if (CONFIG.image.blur.enable)
+                    image_blur(state.img, &CONFIG.image.blur);
+                if (CONFIG.image.cache)
+                    cache_store(CONFIG.image.path, &CONFIG, state.img);
+            }
         }
-        if (state.img->patches && !anim_src_init(&state))
+
+        if (state.img && state.img->patches && !anim_src_init(&state))
         {
             fprintf(stderr, "Out of memory, using the background color\n");
             free_image(&state);
