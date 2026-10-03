@@ -7,6 +7,7 @@ struct BehaviorConfig
 {
     bool ignore_empty_password; /* Enter on an empty field does nothing */
     float fail_delay_s;         /* seconds to wait after a wrong password */
+    bool daemonize;             /* fork into the background once locked */
 };
 
 struct PAM

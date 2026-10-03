@@ -1,6 +1,7 @@
 [behavior]
 ignore_empty_password = true
 fail_delay_s = 2
+daemonize = true # fork into the background once the screen is locked
 
 [pam]
 service = "login"

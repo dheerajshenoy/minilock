@@ -5,6 +5,7 @@
 #include "tomlc17.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <getopt.h>
 #include <pthread.h>
 #include <pwd.h>
@@ -931,6 +932,7 @@ parse_config(void)
         {"behavior.ignore_empty_password", K_BOOL,
          &CONFIG.behavior.ignore_empty_password},
         {"behavior.fail_delay_s", K_FLOAT, &CONFIG.behavior.fail_delay_s},
+        {"behavior.daemonize", K_BOOL, &CONFIG.behavior.daemonize},
 
         {"indicator.input.show", K_BOOL, &CONFIG.input_indicator.show},
         {"indicator.input.color", K_COLOR, &CONFIG.input_indicator.color},
@@ -1053,6 +1055,41 @@ parse_args(int argc, char **argv, struct Config *cfg)
     }
 }
 
+/* Detach into the background: the parent exits and the child carries on as
+ * the locker. Called once the session is locked, so whatever started us
+ * (e.g. swayidle) only continues when the screen really is locked. */
+static void
+daemonize(void)
+{
+    fflush(NULL); /* don't let the child repeat buffered output */
+
+    pid_t pid = fork();
+    if (pid < 0)
+    {
+        perror("fork");
+        return; /* stay in the foreground */
+    }
+    if (pid > 0)
+        _exit(0); /* the child holds the Wayland connection (and the lock) */
+
+    if (setsid() < 0)
+        perror("setsid");
+    if (chdir("/") < 0)
+        perror("chdir");
+
+    int null = open("/dev/null", O_RDWR);
+    if (null >= 0)
+    {
+        dup2(null, STDIN_FILENO);
+#ifndef DEBUG /* debug builds keep their messages */
+        dup2(null, STDOUT_FILENO);
+        dup2(null, STDERR_FILENO);
+#endif
+        if (null > STDERR_FILENO)
+            close(null);
+    }
+}
+
 int
 minilock_init(int argc, char *argv[])
 {
@@ -1138,6 +1175,10 @@ minilock_init(int argc, char *argv[])
     }
 
     wl_display_roundtrip(state.display);
+
+    /* Before any threads or timers exist, so the child starts clean. */
+    if (CONFIG.behavior.daemonize)
+        daemonize();
 
     state.auth_efd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
     if (state.auth_efd < 0)
