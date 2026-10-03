@@ -21,6 +21,8 @@ enum BlurType
 {
     BLUR_BOX = 0,
     BLUR_GAUSSIAN,
+    BLUR_STACK,
+    BLUR_KAWASE,
 };
 
 struct BlurConfig

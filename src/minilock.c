@@ -1005,7 +1005,10 @@ parse_config(void)
                 {
                     const char *name;
                     enum BlurType type;
-                } types[] = {{"box", BLUR_BOX}, {"gaussian", BLUR_GAUSSIAN}};
+                } types[] = {{"box", BLUR_BOX},
+                             {"gaussian", BLUR_GAUSSIAN},
+                             {"stack", BLUR_STACK},
+                             {"kawase", BLUR_KAWASE}};
 
                 bool found = false;
 
