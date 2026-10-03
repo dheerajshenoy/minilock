@@ -4,6 +4,7 @@
 #include "cache.h"
 #include "config.h"
 #include "decoder.h"
+#include "keypress_indicator.h"
 #include "tomlc17.h"
 
 #include <errno.h>
@@ -28,9 +29,14 @@
 static struct Config CONFIG = {
     .behavior
     = {.daemonize = true, .ignore_empty_password = true, .fail_delay_s = 2.0f},
-    .image = {.bgcolor = 0xFFFF5000,
-              .cache   = true,
-              .blur    = {.radius = 10, .iterations = 1}},
+    .image              = {.bgcolor = 0xFFFF5000,
+                           .cache   = true,
+                           .blur    = {.radius = 10, .iterations = 1}},
+    .keypress_indicator = {.radius          = 10,
+                           .color_typing    = 0xFF4DA3FF, /* blue   */
+                           .color_verifying = 0xFFFFD60A, /* yellow */
+                           .color_failed    = 0xFFFF453A, /* red    */
+                           /* color_idle: see parse_config */},
 };
 
 static void
@@ -132,11 +138,20 @@ static const struct ext_session_lock_v1_listener lock_listener = {
 
 /* ---------------- buffers and surfaces ---------------- */
 
+static void render_output(struct output *o);
+
 static void
 buffer_release(void *data, struct wl_buffer *buf)
 {
     struct shm_buf *b = data;
     b->busy           = false;
+
+    /* A redraw was skipped because both buffers were held; do it now. */
+    if (b->out && b->out->redraw)
+    {
+        b->out->redraw = false;
+        render_output(b->out);
+    }
 }
 
 static const struct wl_buffer_listener buffer_listener = {
@@ -166,6 +181,9 @@ shm_buf_create(struct state *s, struct shm_buf *b, uint32_t w, uint32_t h)
         return false;
     }
 
+    b->cairo_surface = cairo_image_surface_create_for_data(
+        (unsigned char *)px, CAIRO_FORMAT_ARGB32, w, h, stride);
+
     struct wl_shm_pool *pool = wl_shm_create_pool(s->shm, fd, size);
     b->buf = wl_shm_pool_create_buffer(pool, 0, w, h, stride,
                                        WL_SHM_FORMAT_ARGB8888);
@@ -176,6 +194,7 @@ shm_buf_create(struct state *s, struct shm_buf *b, uint32_t w, uint32_t h)
     b->size = size;
     b->busy = false;
     wl_buffer_add_listener(b->buf, &buffer_listener, b);
+
     return true;
 }
 
@@ -184,6 +203,8 @@ shm_buf_destroy(struct shm_buf *b)
 {
     if (b->buf)
         wl_buffer_destroy(b->buf);
+    if (b->cairo_surface)
+        cairo_surface_destroy(b->cairo_surface);
     if (b->px)
         munmap(b->px, b->size);
     memset(b, 0, sizeof(*b));
@@ -487,7 +508,7 @@ render_output(struct output *o)
         return;
 
     bool animated = o->canvas != NULL;
-    if (animated && o->dirty.x1 <= o->dirty.x0)
+    if (animated && o->dirty.x1 <= o->dirty.x0 && !o->indicator_dirty)
         return; /* nothing changed since the last present */
 
     struct shm_buf *b = NULL;
@@ -495,29 +516,49 @@ render_output(struct output *o)
         if (!o->bufs[i].busy)
             b = &o->bufs[i];
     if (!b)
-        return; /* compositor still holds both; dirty area is kept */
+    {
+        o->redraw = true; /* retried when the compositor releases one */
+        return;
+    }
+    b->out = o;
 
     if (!b->buf && !shm_buf_create(o->state, b, o->width, o->height))
         return;
 
-    int dx = 0, dy = 0, dw = o->width, dh = o->height;
+    /* We write the pixels ourselves, so tell cairo before and after. */
+    cairo_surface_flush(b->cairo_surface);
+
+    struct rect dmg = {0, 0, (int)o->width, (int)o->height};
     if (animated)
     {
         /* The buffer may be a frame behind, so copy the whole canvas; only
-         * the damage hint is limited to the changed rectangle. */
+         * the damage hint is limited to what changed. */
         memcpy(b->px, o->canvas, b->size);
-        dx       = o->dirty.x0;
-        dy       = o->dirty.y0;
-        dw       = o->dirty.x1 - o->dirty.x0;
-        dh       = o->dirty.y1 - o->dirty.y0;
+        dmg      = o->dirty;
         o->dirty = (struct rect){0};
     }
     else
         draw_image(b->px, o->width, o->height, o->state->img);
 
+    cairo_surface_mark_dirty(b->cairo_surface);
+
+    if (CONFIG.keypress_indicator.show)
+    {
+        render_keypress_indicator(b->cairo_surface, o->width, o->height,
+                                  &CONFIG.keypress_indicator,
+                                  o->state->keypress_indicator_state);
+
+        int ix, iy, isz;
+        keypress_indicator_bounds(o->width, o->height,
+                                  &CONFIG.keypress_indicator, &ix, &iy, &isz);
+        rect_add(&dmg, ix, iy, ix + isz, iy + isz);
+    }
+    o->indicator_dirty = false;
+
     b->busy = true;
     wl_surface_attach(o->surface, b->buf, 0, 0);
-    wl_surface_damage_buffer(o->surface, dx, dy, dw, dh);
+    wl_surface_damage_buffer(o->surface, dmg.x0, dmg.y0, dmg.x1 - dmg.x0,
+                             dmg.y1 - dmg.y0);
     wl_surface_commit(o->surface);
 }
 
@@ -598,6 +639,30 @@ check_password(const char *pw)
 
 /* ---------------- keyboard ---------------- */
 
+/* How long the typing highlight lasts after the last key, and how long the
+ * "wrong password" flash stays. */
+#define TYPING_HOLD_MS 400
+#define FAILED_FLASH_MS 1000
+
+static void arm_timer(int fd, float ms);
+
+/* Change what the indicator shows, and redraw every output if it changed. */
+static void
+indicator_set(struct state *s, enum KeypressIndicatorState st)
+{
+    if (s->keypress_indicator_state == st)
+        return;
+    s->keypress_indicator_state = st;
+
+    if (!CONFIG.keypress_indicator.show)
+        return;
+    for (struct output *o = s->outputs; o; o = o->next)
+    {
+        o->indicator_dirty = true;
+        render_output(o);
+    }
+}
+
 static void *
 auth_thread(void *data)
 {
@@ -640,6 +705,7 @@ start_auth(struct state *s)
     }
     pthread_detach(t);
     s->auth_pending = true;
+    indicator_set(s, KEYPRESS_INDICATOR_STATE_VERIFYING);
 }
 
 static void
@@ -692,10 +758,13 @@ kb_key(void *data, struct wl_keyboard *kb, uint32_t serial, uint32_t time,
     xkb_keycode_t code = key + 8;
     xkb_keysym_t sym   = xkb_state_key_get_one_sym(s->xkb_state, code);
 
+    bool changed = false; /* did the typed text change? */
+
     if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter)
     {
         if (s->pw_len || !CONFIG.behavior.ignore_empty_password)
-            start_auth(s);
+            start_auth(s); /* shows the verifying state */
+        return;
     }
     else if (sym == XKB_KEY_BackSpace)
     {
@@ -703,11 +772,13 @@ kb_key(void *data, struct wl_keyboard *kb, uint32_t serial, uint32_t time,
         while (s->pw_len > 0 && (s->password[--s->pw_len] & 0xC0) == 0x80)
         {
         }
+        changed = true;
     }
     else if (sym == XKB_KEY_Escape)
     {
         explicit_bzero(s->password, sizeof(s->password));
         s->pw_len = 0;
+        changed   = true;
     }
     else
     {
@@ -718,7 +789,20 @@ kb_key(void *data, struct wl_keyboard *kb, uint32_t serial, uint32_t time,
         {
             memcpy(s->password + s->pw_len, buf, n);
             s->pw_len += n;
+            changed = true;
         }
+    }
+
+    /* Modifier-only keys change nothing, so they leave the indicator alone
+     * (and don't clear a "failed" flash early). */
+    if (changed)
+    {
+        indicator_set(s, s->pw_len ? KEYPRESS_INDICATOR_STATE_TYPING
+                                   : KEYPRESS_INDICATOR_STATE_IDLE);
+
+        /* Every key restarts the hold, so it fades once typing stops. */
+        if (s->pw_len && s->indicator_tfd >= 0)
+            arm_timer(s->indicator_tfd, TYPING_HOLD_MS);
     }
 }
 
@@ -919,7 +1003,7 @@ parse_config(void)
 
     enum kind
     {
-        K_STRING, /* const char *, copied */
+        K_STRING = 0, /* const char *, copied */
         K_BOOL,
         K_INT,
         K_FLOAT, /* TOML float or integer -> float */
@@ -927,43 +1011,44 @@ parse_config(void)
         K_TINT,  /* "#RRGGBBAA" only -> uint32_t 0xAARRGGBB */
         K_BLUR,  /* "box" | "gaussian" | "kawase" | "stack" -> BlurType */
         K_POS,   /* integer >= 1 -> int */
+        K_SHAPE, /* "circle" | "square" -> KeypressIndicatorShape */
     };
     struct
     {
         const char *key;
         enum kind kind;
         void *dest;
-    } entries[]
-        = {{"image.bgcolor", K_COLOR, &CONFIG.image.bgcolor},
-           {"image.path", K_STRING, &CONFIG.image.path},
-           {"image.smooth", K_BOOL, &CONFIG.image.smooth},
-           {"image.cache", K_BOOL, &CONFIG.image.cache},
-           {"image.tint", K_TINT, &CONFIG.image.tint_argb},
-           {"image.blur.enable", K_BOOL, &CONFIG.image.blur.enable},
-           {"image.blur.radius", K_POS, &CONFIG.image.blur.radius},
-           {"image.blur.iterations", K_POS, &CONFIG.image.blur.iterations},
-           {"image.blur.type", K_BLUR, &CONFIG.image.blur.type},
+    } entries[] = {
+        {"image.bgcolor", K_COLOR, &CONFIG.image.bgcolor},
+        {"image.path", K_STRING, &CONFIG.image.path},
+        {"image.smooth", K_BOOL, &CONFIG.image.smooth},
+        {"image.cache", K_BOOL, &CONFIG.image.cache},
+        {"image.tint", K_TINT, &CONFIG.image.tint_argb},
+        {"image.blur.enable", K_BOOL, &CONFIG.image.blur.enable},
+        {"image.blur.radius", K_POS, &CONFIG.image.blur.radius},
+        {"image.blur.iterations", K_POS, &CONFIG.image.blur.iterations},
+        {"image.blur.type", K_BLUR, &CONFIG.image.blur.type},
 
-           {"behavior.ignore_empty_password", K_BOOL,
-            &CONFIG.behavior.ignore_empty_password},
-           {"behavior.fail_delay_s", K_FLOAT, &CONFIG.behavior.fail_delay_s},
-           {"behavior.daemonize", K_BOOL, &CONFIG.behavior.daemonize},
+        {"behavior.ignore_empty_password", K_BOOL,
+         &CONFIG.behavior.ignore_empty_password},
+        {"behavior.fail_delay_s", K_FLOAT, &CONFIG.behavior.fail_delay_s},
+        {"behavior.daemonize", K_BOOL, &CONFIG.behavior.daemonize},
 
-           {"indicator.input.show", K_BOOL, &CONFIG.input_indicator.show},
-           {"indicator.input.color", K_COLOR, &CONFIG.input_indicator.color},
-           {"indicator.input.color_idle", K_COLOR,
-            &CONFIG.input_indicator.color_idle},
-           {"indicator.input.color_typing", K_COLOR,
-            &CONFIG.input_indicator.color_typing},
-           {"indicator.input.color_wrong", K_COLOR,
-            &CONFIG.input_indicator.color_wrong},
-           {"indicator.input.color_correct", K_COLOR,
-            &CONFIG.input_indicator.color_correct},
-           {"indicator.input.color_verifying", K_COLOR,
-            &CONFIG.input_indicator.color_verifying},
-           {"indicator.input.type", K_STRING, &CONFIG.input_indicator.type},
-           {"indicator.input.radius", K_INT, &CONFIG.input_indicator.radius},
-           {0, 0, 0}};
+        {"indicator.keypress.show", K_BOOL, &CONFIG.keypress_indicator.show},
+        {"indicator.keypress.color", K_COLOR, &CONFIG.keypress_indicator.color},
+        {"indicator.keypress.color_idle", K_COLOR,
+         &CONFIG.keypress_indicator.color_idle},
+        {"indicator.keypress.color_typing", K_COLOR,
+         &CONFIG.keypress_indicator.color_typing},
+        {"indicator.keypress.color_verifying", K_COLOR,
+         &CONFIG.keypress_indicator.color_verifying},
+        {"indicator.keypress.color_failed", K_COLOR,
+         &CONFIG.keypress_indicator.color_failed},
+        {"indicator.keypress.shape", K_SHAPE, &CONFIG.keypress_indicator.shape},
+        {"indicator.keypress.radius", K_POS, &CONFIG.keypress_indicator.radius},
+        {"indicator.keypress.hide_length", K_BOOL,
+         &CONFIG.keypress_indicator.hide_length},
+        {0, 0, 0}};
 
     for (int i = 0; entries[i].key; i++)
     {
@@ -999,6 +1084,28 @@ parse_config(void)
                     toml_error("Must be between 1 and 1000: ", entries[i].key);
                 *(int *)entries[i].dest = (int)datum.u.int64;
                 break;
+            case K_SHAPE:
+            {
+                static const struct
+                {
+                    const char *name;
+                    enum KeypressIndicatorShape shape;
+                } shapes[]
+                    = {{"circle", SHAPE_CIRCLE}, {"square", SHAPE_SQUARE}};
+
+                bool found = false;
+                for (size_t t = 0; t < sizeof(shapes) / sizeof(*shapes); t++)
+                    if (!strcmp(datum.u.s, shapes[t].name))
+                    {
+                        *(enum KeypressIndicatorShape *)entries[i].dest
+                            = shapes[t].shape;
+                        found = true;
+                    }
+                if (!found)
+                    toml_error("Unknown shape (use circle or square) for key: ",
+                               entries[i].key);
+                break;
+            }
             case K_BLUR:
             {
                 static const struct
@@ -1048,6 +1155,19 @@ parse_config(void)
 
     CONFIG.image.path = expand_home(CONFIG.image.path);
     return true;
+}
+
+/* Defaults that depend on what was (or wasn't) configured. Runs even when
+ * there is no config file. */
+static void
+finish_config(void)
+{
+    /* Idle uses color_idle, else the plain `color`, else white. The other
+     * states have their own defaults, so the indicator visibly changes even
+     * when only `color` is configured. */
+    struct KeypressIndicatorConfig *ki = &CONFIG.keypress_indicator;
+    if (!ki->color_idle)
+        ki->color_idle = ki->color ? ki->color : 0xFFFFFFFF;
 }
 
 static void
@@ -1141,7 +1261,9 @@ minilock_init(int argc, char *argv[])
 {
     parse_args(argc, argv, &CONFIG);
     parse_config();
+    finish_config();
     struct state state = {0};
+    state.indicator_tfd = -1; /* 0 would be stdin */
 
     /* If there's no image, or it fails to load, the background color is used
      * (still locking beats refusing to start). */
@@ -1250,6 +1372,10 @@ minilock_init(int argc, char *argv[])
         return 1;
     }
 
+    /* One-shot timer that returns the indicator from "failed" to idle. */
+    state.indicator_tfd
+        = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
+
     /* Frame timer, only for animated images. */
     struct image *img = state.img;
     int tfd           = -1;
@@ -1270,12 +1396,13 @@ minilock_init(int argc, char *argv[])
             break;
         }
 
-        struct pollfd pfds[3] = {
+        struct pollfd pfds[4] = {
             {wl_display_get_fd(state.display), POLLIN, 0},
             {tfd, POLLIN, 0}, /* a negative fd is ignored by poll */
             {state.auth_efd, POLLIN, 0},
+            {state.indicator_tfd, POLLIN, 0},
         };
-        if (poll(pfds, 3, 500) <= 0)
+        if (poll(pfds, 4, 500) <= 0)
         {
             wl_display_cancel_read(state.display);
             continue;
@@ -1300,8 +1427,26 @@ minilock_init(int argc, char *argv[])
                 if (atomic_load(&state.auth_result) == 1)
                     state.authenticated = true;
                 else
+                {
                     fprintf(stderr, "Wrong password\n");
+                    indicator_set(&state, KEYPRESS_INDICATOR_STATE_FAILED);
+                    if (state.indicator_tfd >= 0)
+                        arm_timer(state.indicator_tfd, FAILED_FLASH_MS);
+                }
             }
+        }
+
+        if (state.indicator_tfd >= 0 && (pfds[3].revents & POLLIN))
+        {
+            uint64_t n;
+            /* "Typing" and "failed" are momentary: back to idle. (Verifying
+             * stays until the result arrives.) */
+            if (read(state.indicator_tfd, &n, sizeof(n)) > 0
+                && (state.keypress_indicator_state
+                        == KEYPRESS_INDICATOR_STATE_TYPING
+                    || state.keypress_indicator_state
+                           == KEYPRESS_INDICATOR_STATE_FAILED))
+                indicator_set(&state, KEYPRESS_INDICATOR_STATE_IDLE);
         }
 
         if (tfd >= 0 && (pfds[1].revents & POLLIN))
@@ -1323,6 +1468,8 @@ minilock_init(int argc, char *argv[])
     }
     if (tfd >= 0)
         close(tfd);
+    if (state.indicator_tfd >= 0)
+        close(state.indicator_tfd);
     close(state.auth_efd);
     free(state.src_canvas);
     free(state.src_prev);

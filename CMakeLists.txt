@@ -82,6 +82,7 @@ add_executable(${PROJECT_NAME}
   src/blur.c
   src/cache.c
   src/tomlc17.c
+  src/keypress_indicator.c
   ${GEN_DIR}/ext-session-lock-v1-client-protocol.h
   ${GEN_DIR}/ext-session-lock-v1-protocol.c
 )

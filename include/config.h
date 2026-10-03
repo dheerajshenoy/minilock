@@ -25,6 +25,12 @@ enum BlurType
     BLUR_KAWASE,
 };
 
+enum KeypressIndicatorShape
+{
+    SHAPE_CIRCLE = 0,
+    SHAPE_SQUARE,
+};
+
 struct BlurConfig
 {
     bool enable;
@@ -45,16 +51,15 @@ struct ImageConfig
     struct BlurConfig blur;
 };
 
-struct InputIndicatorConfig
+struct KeypressIndicatorConfig
 {
     bool show;
     uint32_t color;
-    const char *type;
+    enum KeypressIndicatorShape shape;
     uint32_t color_idle;
     uint32_t color_typing;
-    uint32_t color_wrong;
-    uint32_t color_correct;
     uint32_t color_verifying;
+    uint32_t color_failed;
     bool hide_length;
     int radius;
 };
@@ -63,7 +68,7 @@ struct Config
 {
     const char *path;
     struct ImageConfig image;
-    struct InputIndicatorConfig input_indicator;
+    struct KeypressIndicatorConfig keypress_indicator;
     struct BehaviorConfig behavior;
     struct PAM pam;
 };

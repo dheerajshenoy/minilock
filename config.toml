@@ -3,24 +3,24 @@ ignore_empty_password = true
 fail_delay_s = 2
 daemonize = true # fork into the background once the screen is locked
 
-[pam]
-service = "login"
+# [pam]
+# service = "login"
 
 [image]
 bgcolor = "#000000" # if image is not specified or not loaded, this color will be used as background color
-# path = "~/Downloads/9bc27292880429.5e569ff84e4d0.gif"
-path = "~/Gits/wallpapers/40.png"
+path = "~/Downloads/9bc27292880429.5e569ff84e4d0.gif"
+# path = "~/Gits/wallpapers/40.png"
 smooth = true
 tint = "#FF500044" # if image is specified and loaded, this color will be used as tint color on top of the image
 
 [image.blur]
-enable = false
-radius = 10
+enable = true
+radius = 4
 iterations = 3
-type = "box" # "box" or "gaussian" or "kawase" or "stack"
+type = "kawase" # "box" or "gaussian" or "kawase" or "stack"
 
-[indicator.input]
+[indicator.keypress]
 show = true
 color = "#FF5000"
-type = "circle"
+shape = "circle"
 radius = 10

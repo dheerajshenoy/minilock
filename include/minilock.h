@@ -2,9 +2,11 @@
 
 #define _GNU_SOURCE /* memfd_create, explicit_bzero: must come first */
 #include "ext-session-lock-v1-client-protocol.h"
+#include "keypress_indicator.h"
 
-#include <stdbool.h>
+#include <cairo.h>
 #include <stdatomic.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,13 +14,17 @@
 
 struct state; /* forward declaration */
 
+struct output;
+
 /* One persistently-mapped shm buffer. */
 struct shm_buf
 {
+    struct output *out; /* whose buffer this is */
     struct wl_buffer *buf;
     uint32_t *px;
     size_t size;
     bool busy; /* attached and not yet released by the compositor */
+    cairo_surface_t *cairo_surface;
 };
 
 struct rect
@@ -44,6 +50,8 @@ struct output
     struct ext_session_lock_surface_v1 *lock_surface;
     uint32_t width, height;
     struct shm_buf bufs[2]; /* double buffered so animation can reuse them */
+    bool redraw;            /* wanted a redraw but both buffers were in use */
+    bool indicator_dirty;   /* the indicator changed since the last present */
 
     /* Animation: the image scaled to this output (NULL for still images). */
     uint32_t *canvas;
@@ -85,8 +93,10 @@ struct state
      * whole-frame animations just point src_cur at the current frame. */
     uint32_t *src_canvas, *src_prev;
     const uint32_t *src_cur;
-    int src_shown; /* frame composited so far, -1 for none */
+    int src_shown;         /* frame composited so far, -1 for none */
     struct rect src_dirty; /* region the last step changed */
+    enum KeypressIndicatorState keypress_indicator_state;
+    int indicator_tfd; /* one-shot timer: typing/failed -> idle, or -1 */
 };
 
 int
