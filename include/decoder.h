@@ -40,6 +40,11 @@ struct image
     int current_frame;
 };
 
+/* Blend a 0xAARRGGBB tint over every pixel of the image (all frames, and the
+ * palettes of palette-based animations). The tint's alpha is its strength. */
+void
+image_tint(struct image *img, uint32_t tint);
+
 /* Free an image and everything it owns. */
 void
 image_free(struct image *img);

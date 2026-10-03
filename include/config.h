@@ -8,7 +8,8 @@ struct ImageConfig
     const char *bgcolor;
     const char *path;
     bool smooth;
-    const char *tint;
+    const char *tint;   /* "#RRGGBBAA", blended over the image */
+    uint32_t tint_argb; /* parsed from tint; alpha 0 means no tint */
 };
 
 struct InputIndicatorConfig

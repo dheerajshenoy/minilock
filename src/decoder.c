@@ -811,6 +811,43 @@ out:
     return ok;
 }
 
+static uint32_t
+tint_px(uint32_t px, uint32_t tint)
+{
+    uint32_t a = tint >> 24, out = 0;
+    for (int sh = 0; sh <= 16; sh += 8)
+    {
+        uint32_t c = (px >> sh) & 0xFF, t = (tint >> sh) & 0xFF;
+        out |= ((c * (255 - a) + t * a + 127) / 255) << sh;
+    }
+    return (px & 0xFF000000u) | out;
+}
+
+void
+image_tint(struct image *img, uint32_t tint)
+{
+    if (!img || !(tint >> 24))
+        return;
+
+    if (img->data)
+    {
+        uint32_t *px = img->data;
+        for (size_t i = 0; i < (size_t)img->w * img->h; i++)
+            px[i] = tint_px(px[i], tint);
+    }
+
+    for (int f = 0; f < img->n_frames; f++)
+    {
+        struct frame_patch *p = &img->patches[f];
+        if (p->argb)
+            for (size_t i = 0; i < (size_t)p->w * p->h; i++)
+                p->argb[i] = tint_px(p->argb[i], tint);
+        if (p->pal) /* tint the 256 palette entries once, not every pixel */
+            for (int c = 0; c < 256; c++)
+                p->pal[c] = tint_px(p->pal[c], tint);
+    }
+}
+
 void
 image_free(struct image *img)
 {

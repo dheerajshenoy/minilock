@@ -730,6 +730,20 @@ parse_color(const char *s, uint32_t *out)
     return true;
 }
 
+/* "#RRGGBBAA" -> 0xAARRGGBB. The alpha is required: it is the tint strength. */
+static bool
+parse_tint(const char *s, uint32_t *out)
+{
+    if (*s == '#')
+        s++;
+    char *end;
+    unsigned long v = strtoul(s, &end, 16);
+    if (end == s || *end != '\0' || strlen(s) != 8)
+        return false;
+    *out = (uint32_t)(v & 0xFF) << 24 | (uint32_t)(v >> 8);
+    return true;
+}
+
 /* $XDG_CONFIG_HOME/minilock/config.toml or ~/.config/minilock/config.toml,
  * or NULL if there is no readable file there. */
 static const char *
@@ -826,6 +840,11 @@ parse_config(void)
         && !parse_color(CONFIG.image.bgcolor, &CONFIG.color))
         toml_error("Invalid color for image.bgcolor: ", CONFIG.image.bgcolor);
 
+    if (CONFIG.image.tint
+        && !parse_tint(CONFIG.image.tint, &CONFIG.image.tint_argb))
+        toml_error("Invalid image.tint (expected #RRGGBBAA): ",
+                   CONFIG.image.tint);
+
     CONFIG.image.path = expand_home(CONFIG.image.path);
     return true;
 }
@@ -893,6 +912,8 @@ minilock_init(int argc, char *argv[])
     if (CONFIG.image.path && !load_image(CONFIG.image.path, &state))
         fprintf(stderr, "Failed to load image %s, using the background color\n",
                 CONFIG.image.path);
+    else if (state.img)
+        image_tint(state.img, CONFIG.image.tint_argb);
 
     state.display = wl_display_connect(NULL);
     if (!state.display)
