@@ -42,6 +42,11 @@ load_image(const char *path, struct state *state)
     if (!memcmp(magic, "RIFF", 4) && !memcmp(magic + 8, "WEBP", 4))
         ok = load_webp(path, state->img);
 #endif
+#ifdef HAVE_TIFF
+    if (!memcmp(magic, "II*\0", 4) || !memcmp(magic, "MM\0*", 4)
+        || !memcmp(magic, "II+\0", 4) || !memcmp(magic, "MM\0+", 4))
+        ok = load_tiff(path, state->img);
+#endif
 #ifdef HAVE_PNG
     if (!memcmp(magic, "\x89PNG\r\n\x1a\n", 8))
         ok = load_png(path, state->img);

@@ -210,3 +210,51 @@ load_webp(const char *path, struct image *img)
     return true;
 }
 #endif
+
+#ifdef HAVE_TIFF
+bool
+load_tiff(const char *path, struct image *img)
+{
+    TIFF *tif = TIFFOpen(path, "r");
+    if (!tif)
+    {
+        fprintf(stderr, "Can't open %s\n", path);
+        return false;
+    }
+
+    uint32_t w, h;
+    TIFFGetField(tif, TIFFTAG_IMAGEWIDTH, &w);
+    TIFFGetField(tif, TIFFTAG_IMAGELENGTH, &h);
+
+    img->width  = w;
+    img->height = h;
+    img->stride = w * 4;
+    img->data   = w && h ? malloc((size_t)img->stride * h) : NULL;
+    if (!img->data)
+    {
+        fprintf(stderr, "Failed to allocate memory for image\n");
+        TIFFClose(tif);
+        return false;
+    }
+
+    /* Decodes only the first page, as packed ABGR (R in the low byte). */
+    if (!TIFFReadRGBAImageOriented(tif, w, h, img->data, ORIENTATION_TOPLEFT,
+                                   0))
+    {
+        fprintf(stderr, "TIFF: decode failed\n");
+        TIFFClose(tif);
+        free(img->data);
+        img->data = NULL;
+        return false;
+    }
+    TIFFClose(tif);
+
+    uint32_t *px = img->data;
+    for (size_t i = 0; i < (size_t)w * h; i++)
+        px[i] = (uint32_t)TIFFGetA(px[i]) << 24 | TIFFGetR(px[i]) << 16
+                | TIFFGetG(px[i]) << 8 | TIFFGetB(px[i]);
+
+    flatten_alpha(img);
+    return true;
+}
+#endif

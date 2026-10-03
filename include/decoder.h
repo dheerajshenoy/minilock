@@ -40,3 +40,10 @@ load_png(const char *path, struct image *img);
 bool
 load_webp(const char *path, struct image *img);
 #endif
+
+#ifdef HAVE_TIFF
+    #include <tiffio.h>
+
+bool
+load_tiff(const char *path, struct image *img);
+#endif
