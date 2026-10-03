@@ -1,6 +1,7 @@
 #pragma once
 
 #define _GNU_SOURCE
+#include "decoder.h"
 #include "ext-session-lock-v1-client-protocol.h"
 
 #include <fcntl.h>
@@ -55,3 +56,18 @@ struct state
     uint32_t *img_px;
     int img_w, img_h;
 };
+
+static bool
+load_image(struct state *s, const char *path)
+{
+#ifdef HAVE_PNG
+    if (load_png(path, &s->img_px, &s->img_w, &s->img_h))
+        return true;
+#endif
+#ifdef HAVE_JPEG
+    if (load_jpeg(path, &s->img_px, &s->img_w, &s->img_h))
+        return true;
+#endif
+    fprintf(stderr, "Cannot load image (unsupported or invalid): %s\n", path);
+    return false;
+}

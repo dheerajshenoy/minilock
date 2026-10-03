@@ -1,6 +1,6 @@
 #include "decoder.h"
-#include <stdlib.h>
 
+#include <stdlib.h>
 
 #ifdef HAVE_PNG
 bool
@@ -89,3 +89,67 @@ load_png(const char *path, uint32_t **out, int *w, int *h)
 }
 #endif
 
+#ifdef HAVE_JPEG
+bool
+load_jpeg(const char *path, uint32_t **out, int *w, int *h)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return false;
+
+    struct jpeg_decompress_struct cinfo;
+    struct jpeg_err jerr;
+    uint32_t *volatile px       = NULL;
+    unsigned char *volatile row = NULL;
+
+    cinfo.err           = jpeg_std_error(&jerr.pub);
+    jerr.pub.error_exit = jpeg_err_exit;
+
+    if (setjmp(jerr.jb))
+    {
+        jpeg_destroy_decompress(&cinfo);
+        free(px);
+        free(row);
+        fclose(f);
+        return false;
+    }
+
+    jpeg_create_decompress(&cinfo);
+    jpeg_stdio_src(&cinfo, f);
+    jpeg_read_header(&cinfo, TRUE);
+    cinfo.out_color_space = JCS_RGB; /* 3 bytes per pixel, any source */
+    jpeg_start_decompress(&cinfo);
+
+    int width  = cinfo.output_width;
+    int height = cinfo.output_height;
+
+    px  = malloc((size_t)width * height * 4);
+    row = malloc((size_t)width * 3);
+    if (!px || !row)
+        longjmp(jerr.jb, 1);
+
+    while (cinfo.output_scanline < cinfo.output_height)
+    {
+        unsigned char *rp = row;
+        int y             = cinfo.output_scanline;
+        jpeg_read_scanlines(&cinfo, &rp, 1);
+        for (int x = 0; x < width; x++)
+        {
+            uint32_t r                = row[x * 3 + 0];
+            uint32_t g                = row[x * 3 + 1];
+            uint32_t b                = row[x * 3 + 2];
+            px[(size_t)y * width + x] = 0xFF000000 | (r << 16) | (g << 8) | b;
+        }
+    }
+
+    jpeg_finish_decompress(&cinfo);
+    jpeg_destroy_decompress(&cinfo);
+    free(row);
+    fclose(f);
+
+    *out = px;
+    *w   = width;
+    *h   = height;
+    return true;
+}
+#endif

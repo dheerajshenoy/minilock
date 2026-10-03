@@ -1,4 +1,3 @@
-#include "decoder.h"
 #include "minilock.h"
 
 #include <math.h>
@@ -295,17 +294,6 @@ static const struct wl_keyboard_listener keyboard_listener = {
     .modifiers   = kb_modifiers,
     .repeat_info = kb_repeat_info,
 };
-
-static bool
-load_image(struct state *s, const char *path)
-{
-#ifdef HAVE_PNG
-    if (load_png(path, &s->img_px, &s->img_w, &s->img_h))
-        return true;
-#endif
-    fprintf(stderr, "Cannot load image (unsupported or invalid): %s\n", path);
-    return false;
-}
 
 int
 main(int argc, char *argv[])
