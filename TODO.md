@@ -7,9 +7,8 @@
     - [x] WEBP
     - [x] TIFF
     - [x] SVG
-    - [ ] GIF
     - [ ] Animated
-        - [ ] GIF
+        - [x] GIF
         - [ ] APNG
         - [ ] WEBP
         - [ ] AVIF
