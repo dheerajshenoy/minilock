@@ -14,7 +14,7 @@
 #include <unistd.h>
 
 /* Bump when the layout below changes; old entries then simply never match. */
-#define CACHE_VERSION 1
+#define CACHE_VERSION 2 /* 2: animations are blurred now */
 #define CACHE_MAGIC "MLCACHE"
 
 #define MAX_DIM 16384

@@ -8,4 +8,4 @@ void
 image_blur(struct image *img, const struct BlurConfig *cfg);
 
 void
-blur_box(uint32_t *data, int w, int h, const struct BlurConfig *cfg);
+blur_box(struct image *img, const struct BlurConfig *cfg);
