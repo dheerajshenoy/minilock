@@ -21,6 +21,19 @@ struct shm_buf
     bool busy; /* attached and not yet released by the compositor */
 };
 
+struct rect
+{
+    int x0, y0, x1, y1; /* empty when x1 <= x0 */
+};
+
+/* For one output column/row: the two image columns/rows to sample and the
+ * weight (0-255) of the second. Nearest-neighbour uses i0 == i1, f == 0. */
+struct axis
+{
+    uint32_t i0, i1;
+    uint8_t f;
+};
+
 struct output
 {
     struct wl_output *wl_output;
@@ -32,12 +45,10 @@ struct output
     uint32_t width, height;
     struct shm_buf bufs[2]; /* double buffered so animation can reuse them */
 
-    /* Animation state, at this output's resolution (NULL for still images). */
-    uint32_t *canvas;       /* the picture after drawing frame `shown` */
-    uint32_t *prev;         /* saved canvas for FRAME_RESTORE */
-    uint32_t *xmap, *ymap;  /* output column/row -> image column/row */
-    int shown;              /* frame currently composited, -1 for none */
-    int dirty_x0, dirty_y0, dirty_x1, dirty_y1; /* not yet presented */
+    /* Animation: the image scaled to this output (NULL for still images). */
+    uint32_t *canvas;
+    struct axis *xm, *ym; /* output column/row -> image sample positions */
+    struct rect dirty;    /* changed since the last present */
 };
 
 struct state
@@ -68,6 +79,14 @@ struct state
     int auth_efd;           /* eventfd signalled when the worker finishes */
 
     struct image *img;
+
+    /* Animation source, shared by all outputs: the composited frame at the
+     * image's own resolution. Palette (GIF) frames are drawn onto src_canvas;
+     * whole-frame animations just point src_cur at the current frame. */
+    uint32_t *src_canvas, *src_prev;
+    const uint32_t *src_cur;
+    int src_shown; /* frame composited so far, -1 for none */
+    struct rect src_dirty; /* region the last step changed */
 };
 
 int

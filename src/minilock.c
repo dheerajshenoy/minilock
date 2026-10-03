@@ -21,7 +21,8 @@
 #include <unistd.h>
 #include <xkbcommon/xkbcommon.h>
 
-static struct Config CONFIG = {0};
+/* Defaults; parse_config overrides what the file sets. */
+static struct Config CONFIG = {.behavior = {.fail_delay_s = 2.0f}};
 
 static void
 free_image(struct state *state);
@@ -182,28 +183,90 @@ shm_buf_destroy(struct shm_buf *b)
     memset(b, 0, sizeof(*b));
 }
 
-/* Scale-to-cover mapping: for each output column/row, the image column/row
- * it shows. The image is centered and cropped, keeping its aspect ratio. */
+/* ---- scaling ---- */
+
+/* Scale-to-cover axis map: the image is centered and cropped, keeping its
+ * aspect ratio. With `smooth`, each position samples two neighbours with a
+ * 0-255 weight (bilinear); otherwise it picks the nearest one. */
 static void
-build_maps(uint32_t w, uint32_t h, const struct image *img, uint32_t *xmap,
-           uint32_t *ymap)
+build_axis(struct axis *a, uint32_t out_n, uint32_t in_n, uint64_t scaled,
+           int64_t offset, bool smooth)
+{
+    for (uint32_t x = 0; x < out_n; x++)
+    {
+        if (!smooth)
+        {
+            uint64_t i = (uint64_t)(x + offset) * in_n / scaled;
+            if (i >= in_n)
+                i = in_n - 1;
+            a[x] = (struct axis){(uint32_t)i, (uint32_t)i, 0};
+            continue;
+        }
+
+        /* Sample centre in 1/256 pixel units: (x + 0.5) * in/scaled - 0.5 */
+        int64_t pos = ((2 * ((int64_t)x + offset) + 1) * (int64_t)in_n * 128)
+                          / (int64_t)scaled
+                      - 128;
+        int64_t max = (int64_t)(in_n - 1) * 256;
+        pos         = pos < 0 ? 0 : pos > max ? max : pos;
+        uint32_t i0 = pos >> 8;
+        a[x]        = (struct axis){i0, i0 + 1 < in_n ? i0 + 1 : i0,
+                                    (uint8_t)(pos & 255)};
+    }
+}
+
+static void
+build_axes(uint32_t w, uint32_t h, const struct image *img, struct axis *xm,
+           struct axis *ym, bool smooth)
 {
     uint64_t sw = w, sh = h;
     bool wide   = sw * img->h > sh * img->w;
     uint64_t dw = wide ? sw : (sh * img->w + img->h - 1) / img->h;
     uint64_t dh = wide ? (sw * img->h + img->w - 1) / img->w : sh;
-    int64_t ox  = ((int64_t)dw - (int64_t)w) / 2;
-    int64_t oy  = ((int64_t)dh - (int64_t)h) / 2;
 
-    for (uint32_t x = 0; x < w; x++)
+    build_axis(xm, w, img->w, dw, ((int64_t)dw - (int64_t)w) / 2, smooth);
+    build_axis(ym, h, img->h, dh, ((int64_t)dh - (int64_t)h) / 2, smooth);
+}
+
+/* a*(256-f) + b*f per channel, two channels at a time. */
+static inline uint32_t
+lerp_px(uint32_t a, uint32_t b, uint32_t f)
+{
+    uint32_t rb = ((a & 0x00FF00FFu) * (256 - f) + (b & 0x00FF00FFu) * f) >> 8;
+    uint32_t ag = (((a >> 8) & 0x00FF00FFu) * (256 - f)
+                   + ((b >> 8) & 0x00FF00FFu) * f);
+    return (rb & 0x00FF00FFu) | (ag & 0xFF00FF00u);
+}
+
+/* Scale the part [x0,x1) x [y0,y1) of the output from src (src_w pixels wide)
+ * into dst (dst_w pixels wide). */
+static void
+scale_rect(uint32_t *dst, uint32_t dst_w, const struct axis *xm,
+           const struct axis *ym, const struct rect *r, const uint32_t *src,
+           uint32_t src_w, bool smooth)
+{
+    for (int y = r->y0; y < r->y1; y++)
     {
-        uint64_t sx = (uint64_t)(x + ox) * img->w / dw;
-        xmap[x]     = sx >= img->w ? img->w - 1 : sx;
-    }
-    for (uint32_t y = 0; y < h; y++)
-    {
-        uint64_t sy = (uint64_t)(y + oy) * img->h / dh;
-        ymap[y]     = sy >= img->h ? img->h - 1 : sy;
+        const struct axis *ya = &ym[y];
+        const uint32_t *r0 = src + (size_t)ya->i0 * src_w;
+        const uint32_t *r1 = src + (size_t)ya->i1 * src_w;
+        uint32_t *out      = dst + (size_t)y * dst_w;
+
+        if (!smooth)
+        {
+            for (int x = r->x0; x < r->x1; x++)
+                out[x] = r0[xm[x].i0];
+            continue;
+        }
+
+        for (int x = r->x0; x < r->x1; x++)
+        {
+            const struct axis *xa = &xm[x];
+            uint32_t px = lerp_px(r0[xa->i0], r0[xa->i1], xa->f);
+            if (ya->f)
+                px = lerp_px(px, lerp_px(r1[xa->i0], r1[xa->i1], xa->f), ya->f);
+            out[x] = px;
+        }
     }
 }
 
@@ -211,190 +274,200 @@ build_maps(uint32_t w, uint32_t h, const struct image *img, uint32_t *xmap,
 static void
 draw_image(uint32_t *px, uint32_t w, uint32_t h, const struct image *img)
 {
-    uint32_t *maps = img && img->data && img->w && img->h
-                         ? malloc(((size_t)w + h) * sizeof(*maps))
-                         : NULL;
-    if (!maps)
+    struct axis *axes = img && img->data && img->w && img->h
+                            ? malloc(((size_t)w + h) * sizeof(*axes))
+                            : NULL;
+    if (!axes)
     {
-        uint32_t fill = CONFIG.color ? CONFIG.color : IMAGE_BG;
+        /* The surface is opaque, so ignore any alpha in bgcolor. */
+        uint32_t fill = CONFIG.image.bgcolor
+                            ? CONFIG.image.bgcolor | 0xFF000000u
+                            : IMAGE_BG;
         for (size_t i = 0; i < (size_t)w * h; i++)
             px[i] = fill;
         return;
     }
-    uint32_t *xmap = maps, *ymap = maps + w;
-    build_maps(w, h, img, xmap, ymap);
 
-    for (uint32_t y = 0; y < h; y++)
-    {
-        const uint32_t *src
-            = (const uint32_t *)((const char *)img->data
-                                 + (size_t)ymap[y] * img->stride);
-        uint32_t *dst = px + (size_t)y * w;
-        for (uint32_t x = 0; x < w; x++)
-            dst[x] = src[xmap[x]];
-    }
-    free(maps);
+    build_axes(w, h, img, axes, axes + w, CONFIG.image.smooth);
+    struct rect all = {0, 0, (int)w, (int)h};
+    scale_rect(px, w, axes, axes + w, &all, img->data, img->w,
+               CONFIG.image.smooth);
+    free(axes);
 }
 
-/* ---- animation: patches composited onto an output-sized canvas ---- */
+/* ---- animation ---- */
 
 static void
-dirty_add(struct output *o, int x0, int y0, int x1, int y1)
+rect_add(struct rect *r, int x0, int y0, int x1, int y1)
 {
-    if (o->dirty_x1 <= o->dirty_x0) /* currently empty */
+    if (r->x1 <= r->x0) /* currently empty */
     {
-        o->dirty_x0 = x0;
-        o->dirty_y0 = y0;
-        o->dirty_x1 = x1;
-        o->dirty_y1 = y1;
+        *r = (struct rect){x0, y0, x1, y1};
         return;
     }
-    if (x0 < o->dirty_x0)
-        o->dirty_x0 = x0;
-    if (y0 < o->dirty_y0)
-        o->dirty_y0 = y0;
-    if (x1 > o->dirty_x1)
-        o->dirty_x1 = x1;
-    if (y1 > o->dirty_y1)
-        o->dirty_y1 = y1;
+    if (x0 < r->x0) r->x0 = x0;
+    if (y0 < r->y0) r->y0 = y0;
+    if (x1 > r->x1) r->x1 = x1;
+    if (y1 > r->y1) r->y1 = y1;
 }
 
-/* Output-space rectangle showing patch p. maps are monotonic, so the output
- * columns/rows that map into [left, left+w) form one contiguous range. */
-static bool
-patch_bbox(const struct output *o, const struct frame_patch *p, int *bx0,
-           int *by0, int *bx1, int *by1)
-{
-    if (!p->w || !p->h)
-        return false;
-    int x0 = 0, y0 = 0;
-    while (x0 < (int)o->width && (int)o->xmap[x0] < p->left)
-        x0++;
-    int x1 = x0;
-    while (x1 < (int)o->width && (int)o->xmap[x1] < p->left + p->w)
-        x1++;
-    while (y0 < (int)o->height && (int)o->ymap[y0] < p->top)
-        y0++;
-    int y1 = y0;
-    while (y1 < (int)o->height && (int)o->ymap[y1] < p->top + p->h)
-        y1++;
-    *bx0 = x0;
-    *by0 = y0;
-    *bx1 = x1;
-    *by1 = y1;
-    return x1 > x0 && y1 > y0;
-}
-
-/* Draw patch p onto the canvas, or clear its rectangle to the background. */
+/* Draw palette patch p onto the source canvas, or clear its rectangle. */
 static void
-patch_paint(struct output *o, const struct frame_patch *p, bool clear)
+src_paint(struct state *s, const struct frame_patch *p, bool clear)
 {
-    int x0, y0, x1, y1;
-    if (!patch_bbox(o, p, &x0, &y0, &x1, &y1))
-        return;
-
-    if (p->argb)
+    const struct image *img = s->img;
+    for (int r = 0; r < p->h; r++)
     {
-        /* Whole-frame animation: scale the frame straight onto the canvas. */
-        for (int y = y0; y < y1; y++)
+        const uint8_t *row = p->idx + (size_t)r * p->w;
+        uint32_t *dst = s->src_canvas + (size_t)(p->top + r) * img->w + p->left;
+        for (int x = 0; x < p->w; x++)
         {
-            const uint32_t *src = p->argb + (size_t)o->ymap[y] * p->w;
-            uint32_t *dst       = o->canvas + (size_t)y * o->width;
-            for (int x = x0; x < x1; x++)
-                dst[x] = clear ? IMAGE_BG : src[o->xmap[x]];
-        }
-        dirty_add(o, x0, y0, x1, y1);
-        return;
-    }
-
-    for (int y = y0; y < y1; y++)
-    {
-        const uint8_t *row = p->idx + (size_t)(o->ymap[y] - p->top) * p->w;
-        uint32_t *dst      = o->canvas + (size_t)y * o->width;
-        for (int x = x0; x < x1; x++)
-        {
-            uint8_t c = row[o->xmap[x] - p->left];
             if (clear)
                 dst[x] = IMAGE_BG;
-            else if (c != p->transparent)
-                dst[x] = p->pal[c];
+            else if (row[x] != p->transparent)
+                dst[x] = p->pal[row[x]];
         }
     }
-    dirty_add(o, x0, y0, x1, y1);
+    if (p->w && p->h)
+        rect_add(&s->src_dirty, p->left, p->top, p->left + p->w,
+                 p->top + p->h);
 }
 
-/* Advance the canvas from the frame shown so far to frame k. */
+/* Advance the shared source from the frame shown so far to frame k, leaving
+ * the region that changed in s->src_dirty. */
 static void
-anim_step(struct output *o, int k)
+src_step(struct state *s, int k)
 {
-    const struct image *img = o->state->img;
-    size_t px               = (size_t)o->width * o->height;
+    const struct image *img = s->img;
+    size_t px               = (size_t)img->w * img->h;
+    const struct frame_patch *p = &img->patches[k];
 
-    if (o->shown >= 0)
+    s->src_dirty = (struct rect){0};
+
+    if (p->argb) /* whole frame: nothing to composite, just switch to it */
     {
-        const struct frame_patch *old = &img->patches[o->shown];
+        s->src_cur = p->argb;
+        rect_add(&s->src_dirty, 0, 0, img->w, img->h);
+        s->src_shown = k;
+        return;
+    }
+
+    if (s->src_shown >= 0)
+    {
+        const struct frame_patch *old = &img->patches[s->src_shown];
         if (old->disposal == FRAME_CLEAR)
-            patch_paint(o, old, true);
+            src_paint(s, old, true);
         else if (old->disposal == FRAME_RESTORE)
         {
-            int x0, y0, x1, y1;
-            memcpy(o->canvas, o->prev, px * sizeof(*o->canvas));
-            if (patch_bbox(o, old, &x0, &y0, &x1, &y1))
-                dirty_add(o, x0, y0, x1, y1);
+            memcpy(s->src_canvas, s->src_prev, px * sizeof(*s->src_canvas));
+            if (old->w && old->h)
+                rect_add(&s->src_dirty, old->left, old->top, old->left + old->w,
+                         old->top + old->h);
         }
     }
 
     if (k == 0) /* (re)starting the loop */
     {
         for (size_t i = 0; i < px; i++)
-            o->canvas[i] = IMAGE_BG;
-        dirty_add(o, 0, 0, o->width, o->height);
+            s->src_canvas[i] = IMAGE_BG;
+        rect_add(&s->src_dirty, 0, 0, img->w, img->h);
     }
 
-    const struct frame_patch *p = &img->patches[k];
     if (p->disposal == FRAME_RESTORE)
-        memcpy(o->prev, o->canvas, px * sizeof(*o->canvas));
-    patch_paint(o, p, false);
-    o->shown = k;
+        memcpy(s->src_prev, s->src_canvas, px * sizeof(*s->src_canvas));
+    src_paint(s, p, false);
+    s->src_shown = k;
+}
+
+/* Set up the shared source for an animated image. False on failure. */
+static bool
+anim_src_init(struct state *s)
+{
+    const struct image *img = s->img;
+    s->src_shown            = -1;
+
+    if (!img->patches[0].argb) /* palette frames need a canvas to draw on */
+    {
+        size_t bytes  = (size_t)img->w * img->h * sizeof(uint32_t);
+        s->src_canvas = malloc(bytes);
+        s->src_prev   = malloc(bytes);
+        if (!s->src_canvas || !s->src_prev)
+        {
+            free(s->src_canvas);
+            free(s->src_prev);
+            s->src_canvas = s->src_prev = NULL;
+            return false;
+        }
+        s->src_cur = s->src_canvas;
+    }
+
+    for (int k = 0; k <= img->current_frame; k++)
+        src_step(s, k);
+    return true;
 }
 
 static void
 anim_teardown(struct output *o)
 {
     free(o->canvas);
-    free(o->prev);
-    free(o->xmap);
-    free(o->ymap);
-    o->canvas = o->prev = o->xmap = o->ymap = NULL;
-    o->shown                                = -1;
+    free(o->xm);
+    free(o->ym);
+    o->canvas = NULL;
+    o->xm = o->ym = NULL;
 }
 
-/* Allocate this output's canvas and catch it up to the current frame. */
+/* Allocate this output's canvas and scale the current source onto it. */
 static void
 anim_setup(struct output *o)
 {
-    const struct image *img = o->state->img;
+    const struct state *s   = o->state;
+    const struct image *img = s->img;
     anim_teardown(o);
 
-    size_t px = (size_t)o->width * o->height;
-    o->canvas = malloc(px * sizeof(*o->canvas));
-    o->prev   = malloc(px * sizeof(*o->prev));
-    o->xmap   = malloc(o->width * sizeof(*o->xmap));
-    o->ymap   = malloc(o->height * sizeof(*o->ymap));
-    if (!o->canvas || !o->prev || !o->xmap || !o->ymap)
+    o->canvas = malloc((size_t)o->width * o->height * sizeof(*o->canvas));
+    o->xm     = malloc(o->width * sizeof(*o->xm));
+    o->ym     = malloc(o->height * sizeof(*o->ym));
+    if (!o->canvas || !o->xm || !o->ym)
     {
         anim_teardown(o);
         return;
     }
 
-    build_maps(o->width, o->height, img, o->xmap, o->ymap);
-    for (size_t i = 0; i < px; i++)
-        o->canvas[i] = IMAGE_BG;
-    for (int k = 0; k <= img->current_frame; k++)
-        anim_step(o, k);
-    o->dirty_x0 = o->dirty_y0 = 0;
-    o->dirty_x1               = o->width;
-    o->dirty_y1               = o->height;
+    build_axes(o->width, o->height, img, o->xm, o->ym, CONFIG.image.smooth);
+    o->dirty = (struct rect){0, 0, (int)o->width, (int)o->height};
+    scale_rect(o->canvas, o->width, o->xm, o->ym, &o->dirty, s->src_cur,
+               img->w, CONFIG.image.smooth);
+}
+
+/* Re-scale the part of this output affected by a change in source region r. */
+static void
+anim_update(struct output *o, const struct rect *r)
+{
+    if (r->x1 <= r->x0 || r->y1 <= r->y0)
+        return;
+
+    /* Sample positions are monotonic, so the affected output columns/rows
+     * (those reading any source column/row in [r0, r1)) are contiguous. */
+    struct rect out = {0, 0, 0, 0};
+    int x = 0, y = 0;
+    while (x < (int)o->width && (int)o->xm[x].i1 < r->x0)
+        x++;
+    out.x0 = x;
+    while (x < (int)o->width && (int)o->xm[x].i0 < r->x1)
+        x++;
+    out.x1 = x;
+    while (y < (int)o->height && (int)o->ym[y].i1 < r->y0)
+        y++;
+    out.y0 = y;
+    while (y < (int)o->height && (int)o->ym[y].i0 < r->y1)
+        y++;
+    out.y1 = y;
+    if (out.x1 <= out.x0 || out.y1 <= out.y0)
+        return;
+
+    scale_rect(o->canvas, o->width, o->xm, o->ym, &out, o->state->src_cur,
+               o->state->img->w, CONFIG.image.smooth);
+    rect_add(&o->dirty, out.x0, out.y0, out.x1, out.y1);
 }
 
 /* Render into a free buffer and commit it, damaging only what changed. */
@@ -405,7 +478,7 @@ render_output(struct output *o)
         return;
 
     bool animated = o->canvas != NULL;
-    if (animated && o->dirty_x1 <= o->dirty_x0)
+    if (animated && o->dirty.x1 <= o->dirty.x0)
         return; /* nothing changed since the last present */
 
     struct shm_buf *b = NULL;
@@ -424,11 +497,11 @@ render_output(struct output *o)
         /* The buffer may be a frame behind, so copy the whole canvas; only
          * the damage hint is limited to the changed rectangle. */
         memcpy(b->px, o->canvas, b->size);
-        dx          = o->dirty_x0;
-        dy          = o->dirty_y0;
-        dw          = o->dirty_x1 - o->dirty_x0;
-        dh          = o->dirty_y1 - o->dirty_y0;
-        o->dirty_x0 = o->dirty_y0 = o->dirty_x1 = o->dirty_y1 = 0;
+        dx       = o->dirty.x0;
+        dy       = o->dirty.y0;
+        dw       = o->dirty.x1 - o->dirty.x0;
+        dh       = o->dirty.y1 - o->dirty.y0;
+        o->dirty = (struct rect){0};
     }
     else
         draw_image(b->px, o->width, o->height, o->state->img);
@@ -457,11 +530,7 @@ surface_configure(void *data, struct ext_session_lock_surface_v1 *ls,
             anim_setup(o);
     }
     else if (o->canvas)
-    {
-        o->dirty_x0 = o->dirty_y0 = 0;
-        o->dirty_x1               = w;
-        o->dirty_y1               = h;
-    }
+        o->dirty = (struct rect){0, 0, (int)w, (int)h};
     render_output(o);
 }
 
@@ -490,6 +559,14 @@ pam_conv_cb(int n, const struct pam_message **msg, struct pam_response **resp,
     return PAM_SUCCESS;
 }
 
+/* PAM sleeps inside pam_authenticate after a failure (usually ~2s). Giving it
+ * a delay function that does nothing turns that off, so the wait is ours to
+ * control through behavior.fail_delay_s. */
+static void
+pam_no_delay(int status, unsigned usec, void *appdata)
+{
+}
+
 static bool
 check_password(const char *pw)
 {
@@ -502,6 +579,8 @@ check_password(const char *pw)
     /* PROJECT_NAME is already a quoted string from CMake. */
     if (pam_start(PROJECT_NAME, pwd->pw_name, &conv, &h) != PAM_SUCCESS)
         return false;
+
+    pam_set_item(h, PAM_FAIL_DELAY, (const void *)pam_no_delay);
 
     int rc = pam_authenticate(h, 0);
     pam_end(h, rc);
@@ -516,6 +595,17 @@ auth_thread(void *data)
     struct state *s = data;
     bool ok         = check_password(s->auth_pw);
     explicit_bzero(s->auth_pw, sizeof(s->auth_pw));
+
+    /* Wrong password: wait before accepting another attempt. This runs on the
+     * worker thread, so the animation keeps going; typing is ignored until
+     * the result is reported below. */
+    if (!ok && CONFIG.behavior.fail_delay_s > 0)
+    {
+        float d            = CONFIG.behavior.fail_delay_s;
+        struct timespec ts = {(time_t)d, (long)((d - (time_t)d) * 1e9f)};
+        while (nanosleep(&ts, &ts) < 0 && errno == EINTR)
+            ;
+    }
     atomic_store(&s->auth_result, ok ? 1 : 2);
     uint64_t one = 1;
     if (write(s->auth_efd, &one, sizeof(one)) < 0)
@@ -595,7 +685,8 @@ kb_key(void *data, struct wl_keyboard *kb, uint32_t serial, uint32_t time,
 
     if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter)
     {
-        start_auth(s);
+        if (s->pw_len || !CONFIG.behavior.ignore_empty_password)
+            start_auth(s);
     }
     else if (sym == XKB_KEY_BackSpace)
     {
@@ -647,6 +738,37 @@ static const struct wl_keyboard_listener keyboard_listener = {
     .repeat_info = kb_repeat_info,
 };
 
+/* ---------------- seat ---------------- */
+
+/* A keyboard may only be requested once the seat advertises the capability
+ * (asking earlier is a protocol error), and it can come and go. */
+static void
+seat_capabilities(void *data, struct wl_seat *seat, uint32_t caps)
+{
+    struct state *s = data;
+
+    if ((caps & WL_SEAT_CAPABILITY_KEYBOARD) && !s->keyboard)
+    {
+        s->keyboard = wl_seat_get_keyboard(seat);
+        wl_keyboard_add_listener(s->keyboard, &keyboard_listener, s);
+    }
+    else if (!(caps & WL_SEAT_CAPABILITY_KEYBOARD) && s->keyboard)
+    {
+        wl_keyboard_release(s->keyboard);
+        s->keyboard = NULL;
+    }
+}
+
+static void
+seat_name(void *data, struct wl_seat *seat, const char *name)
+{
+}
+
+static const struct wl_seat_listener seat_listener = {
+    .capabilities = seat_capabilities,
+    .name         = seat_name,
+};
+
 /* ---------------- registry ---------------- */
 
 static void
@@ -667,6 +789,7 @@ handle_global(void *data, struct wl_registry *registry, uint32_t name,
     else if (strcmp(interface, wl_seat_interface.name) == 0)
     {
         state->seat = wl_registry_bind(registry, name, &wl_seat_interface, 5);
+        wl_seat_add_listener(state->seat, &seat_listener, state);
     }
     else if (strcmp(interface, wl_output_interface.name) == 0)
     {
@@ -717,30 +840,22 @@ toml_error(const char *msg, const char *msg1)
 }
 
 // ---------------- config ----------------
+/* "#RRGGBB" (opaque) or "#RRGGBBAA" -> 0xAARRGGBB. With require_alpha only
+ * the 8-digit form is accepted (used where the alpha is meaningful). */
 static bool
-parse_color(const char *s, uint32_t *out)
+parse_color(const char *s, bool require_alpha, uint32_t *out)
 {
     if (*s == '#')
         s++;
+    size_t len = strlen(s);
     char *end;
     unsigned long v = strtoul(s, &end, 16);
-    if (end == s || *end != '\0' || strlen(s) != 6)
+    if (end == s || *end != '\0' || (len != 6 && len != 8)
+        || (len == 6 && require_alpha))
         return false;
-    *out = 0xFF000000 | (uint32_t)v;
-    return true;
-}
 
-/* "#RRGGBBAA" -> 0xAARRGGBB. The alpha is required: it is the tint strength. */
-static bool
-parse_tint(const char *s, uint32_t *out)
-{
-    if (*s == '#')
-        s++;
-    char *end;
-    unsigned long v = strtoul(s, &end, 16);
-    if (end == s || *end != '\0' || strlen(s) != 8)
-        return false;
-    *out = (uint32_t)(v & 0xFF) << 24 | (uint32_t)(v >> 8);
+    *out = len == 8 ? (uint32_t)(v & 0xFF) << 24 | (uint32_t)(v >> 8)
+                    : 0xFF000000u | (uint32_t)v;
     return true;
 }
 
@@ -786,7 +901,6 @@ parse_config(void)
     if (!CONFIG.path)
         return false; /* no config file is fine */
 
-    /* The strings below point into this result, so it is never freed. */
     toml_result_t result = toml_parse_file_ex(CONFIG.path);
     if (!result.ok)
     {
@@ -794,23 +908,44 @@ parse_config(void)
         return false;
     }
 
-    typedef struct
+    enum kind
+    {
+        K_STRING, /* const char *, copied */
+        K_BOOL,
+        K_INT,
+        K_FLOAT, /* TOML float or integer -> float */
+        K_COLOR, /* "#RRGGBB" or "#RRGGBBAA" -> uint32_t 0xAARRGGBB */
+        K_TINT,  /* "#RRGGBBAA" only -> uint32_t 0xAARRGGBB */
+    };
+    struct
     {
         const char *key;
-        int type;
+        enum kind kind;
         void *dest;
-    } minilock_toml_entry;
+    } entries[] = {
+        {"image.bgcolor", K_COLOR, &CONFIG.image.bgcolor},
+        {"image.path", K_STRING, &CONFIG.image.path},
+        {"image.smooth", K_BOOL, &CONFIG.image.smooth},
+        {"image.tint", K_TINT, &CONFIG.image.tint_argb},
 
-    minilock_toml_entry entries[] = {
-        {"image.bgcolor", TOML_STRING, &CONFIG.image.bgcolor},
-        {"image.path", TOML_STRING, &CONFIG.image.path},
-        {"image.smooth", TOML_BOOLEAN, &CONFIG.image.smooth},
-        {"image.tint", TOML_STRING, &CONFIG.image.tint},
+        {"behavior.ignore_empty_password", K_BOOL,
+         &CONFIG.behavior.ignore_empty_password},
+        {"behavior.fail_delay_s", K_FLOAT, &CONFIG.behavior.fail_delay_s},
 
-        {"indicator.input.show", TOML_BOOLEAN, &CONFIG.input_indicator.show},
-        {"indicator.input.color", TOML_STRING, &CONFIG.input_indicator.color},
-        {"indicator.input.type", TOML_STRING, &CONFIG.input_indicator.type},
-        {"indicator.input.radius", TOML_INT64, &CONFIG.input_indicator.radius},
+        {"indicator.input.show", K_BOOL, &CONFIG.input_indicator.show},
+        {"indicator.input.color", K_COLOR, &CONFIG.input_indicator.color},
+        {"indicator.input.color_idle", K_COLOR,
+         &CONFIG.input_indicator.color_idle},
+        {"indicator.input.color_typing", K_COLOR,
+         &CONFIG.input_indicator.color_typing},
+        {"indicator.input.color_wrong", K_COLOR,
+         &CONFIG.input_indicator.color_wrong},
+        {"indicator.input.color_correct", K_COLOR,
+         &CONFIG.input_indicator.color_correct},
+        {"indicator.input.color_verifying", K_COLOR,
+         &CONFIG.input_indicator.color_verifying},
+        {"indicator.input.type", K_STRING, &CONFIG.input_indicator.type},
+        {"indicator.input.radius", K_INT, &CONFIG.input_indicator.radius},
         {0, 0, 0}};
 
     for (int i = 0; entries[i].key; i++)
@@ -818,32 +953,50 @@ parse_config(void)
         toml_datum_t datum = toml_seek(result.toptab, entries[i].key);
         if (datum.type == TOML_UNKNOWN)
             continue; /* key not present: keep the default */
-        if (datum.type != entries[i].type)
+
+        enum kind k = entries[i].kind;
+        toml_type_t want = k == K_BOOL  ? TOML_BOOLEAN
+                           : k == K_INT ? TOML_INT64
+                                        : TOML_STRING;
+        bool type_ok = k == K_FLOAT ? datum.type == TOML_FP64
+                                          || datum.type == TOML_INT64
+                                    : datum.type == want;
+        if (!type_ok)
             toml_error("Invalid type for key: ", entries[i].key);
 
-        switch (entries[i].type)
+        switch (k)
         {
-            case TOML_STRING:
-                *(const char **)entries[i].dest = datum.u.s;
+            case K_STRING:
+                *(const char **)entries[i].dest = strdup(datum.u.s);
+                if (!*(const char **)entries[i].dest)
+                    toml_error("Out of memory reading key: ", entries[i].key);
                 break;
-            case TOML_BOOLEAN:
+            case K_BOOL:
                 *(bool *)entries[i].dest = datum.u.boolean;
                 break;
-            case TOML_INT64:
+            case K_INT:
                 *(int *)entries[i].dest = (int)datum.u.int64;
+                break;
+            case K_FLOAT:
+                *(float *)entries[i].dest = datum.type == TOML_FP64
+                                                ? (float)datum.u.fp64
+                                                : (float)datum.u.int64;
+                if (*(float *)entries[i].dest < 0)
+                    toml_error("Must not be negative: ", entries[i].key);
+                break;
+            case K_COLOR:
+            case K_TINT:
+                if (!parse_color(datum.u.s, k == K_TINT,
+                                 (uint32_t *)entries[i].dest))
+                    toml_error(k == K_TINT
+                                   ? "Invalid color (expected #RRGGBBAA) for key: "
+                                   : "Invalid color (expected #RRGGBB or "
+                                     "#RRGGBBAA) for key: ",
+                               entries[i].key);
                 break;
         }
     }
-
-    /* image.bgcolor -> the effective background color. */
-    if (CONFIG.image.bgcolor
-        && !parse_color(CONFIG.image.bgcolor, &CONFIG.color))
-        toml_error("Invalid color for image.bgcolor: ", CONFIG.image.bgcolor);
-
-    if (CONFIG.image.tint
-        && !parse_tint(CONFIG.image.tint, &CONFIG.image.tint_argb))
-        toml_error("Invalid image.tint (expected #RRGGBBAA): ",
-                   CONFIG.image.tint);
+    toml_free(result); /* everything we keep was copied out */
 
     CONFIG.image.path = expand_home(CONFIG.image.path);
     return true;
@@ -913,7 +1066,14 @@ minilock_init(int argc, char *argv[])
         fprintf(stderr, "Failed to load image %s, using the background color\n",
                 CONFIG.image.path);
     else if (state.img)
+    {
         image_tint(state.img, CONFIG.image.tint_argb);
+        if (state.img->patches && !anim_src_init(&state))
+        {
+            fprintf(stderr, "Out of memory, using the background color\n");
+            free_image(&state);
+        }
+    }
 
     state.display = wl_display_connect(NULL);
     if (!state.display)
@@ -921,6 +1081,9 @@ minilock_init(int argc, char *argv[])
         fprintf(stderr, "Failed to connect to Wayland display\n");
         return 1;
     }
+
+    /* Before the registry roundtrip: the keymap can arrive any time after it. */
+    state.xkb_ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
 
     state.registry = wl_display_get_registry(state.display);
     wl_registry_add_listener(state.registry, &registry_listener, &state);
@@ -941,11 +1104,6 @@ minilock_init(int argc, char *argv[])
         fprintf(stderr, "No outputs found\n");
         return 1;
     }
-
-    /* Keyboard + xkb. */
-    state.xkb_ctx  = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
-    state.keyboard = wl_seat_get_keyboard(state.seat);
-    wl_keyboard_add_listener(state.keyboard, &keyboard_listener, &state);
 
     /* Lock. */
     state.lock = ext_session_lock_manager_v1_lock(state.lock_manager);
@@ -998,7 +1156,7 @@ minilock_init(int argc, char *argv[])
             arm_timer(tfd, img->patches[img->current_frame].delay_ms);
     }
 
-    time_t end = time(NULL) + 60; /* temporary safety timeout */
+    time_t end = time(NULL) + 10; /* temporary safety timeout */
     while (!state.authenticated && time(NULL) < end)
     {
         while (wl_display_prepare_read(state.display) != 0)
@@ -1050,10 +1208,11 @@ minilock_init(int argc, char *argv[])
             {
                 img->current_frame = (img->current_frame + 1) % img->n_frames;
                 arm_timer(tfd, img->patches[img->current_frame].delay_ms);
+                src_step(&state, img->current_frame);
                 for (struct output *o = state.outputs; o; o = o->next)
                 {
                     if (o->canvas)
-                        anim_step(o, img->current_frame);
+                        anim_update(o, &state.src_dirty);
                     render_output(o);
                 }
             }
@@ -1062,6 +1221,8 @@ minilock_init(int argc, char *argv[])
     if (tfd >= 0)
         close(tfd);
     close(state.auth_efd);
+    free(state.src_canvas);
+    free(state.src_prev);
 
     ext_session_lock_v1_unlock_and_destroy(state.lock);
     wl_display_roundtrip(state.display); /* flush the unlock request */
