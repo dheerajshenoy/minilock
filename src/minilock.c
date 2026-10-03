@@ -54,6 +54,23 @@ load_image(const char *path, struct state *state)
     if (ext && (!strcasecmp(ext, ".svg") || !strcasecmp(ext, ".svgz")))
         ok = load_svg(path, state->img);
 #endif
+    if (!memcmp(magic, "BM", 2))
+        ok = load_bmp(path, state->img);
+    if (!memcmp(magic + 4, "ftyp", 4))
+    {
+        /* ISO-BMFF container: AVIF and HEIC share it, told apart by brand. */
+        bool avif_brand
+            = !memcmp(magic + 8, "avif", 4) || !memcmp(magic + 8, "avis", 4);
+#ifdef HAVE_AVIF
+        if (avif_brand)
+            ok = load_avif(path, state->img);
+#endif
+#ifdef HAVE_HEIF
+        if (!ok && !avif_brand)
+            ok = load_heif(path, state->img);
+#endif
+        (void)avif_brand;
+    }
 #ifdef HAVE_PNG
     if (!memcmp(magic, "\x89PNG\r\n\x1a\n", 8))
         ok = load_png(path, state->img);

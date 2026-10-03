@@ -54,3 +54,20 @@ load_tiff(const char *path, struct image *img);
 bool
 load_svg(const char *path, struct image *img);
 #endif
+
+#ifdef HAVE_AVIF
+    #include <avif/avif.h>
+
+bool
+load_avif(const char *path, struct image *img);
+#endif
+
+#ifdef HAVE_HEIF
+    #include <libheif/heif.h>
+
+bool
+load_heif(const char *path, struct image *img);
+#endif
+
+bool
+load_bmp(const char *path, struct image *img);

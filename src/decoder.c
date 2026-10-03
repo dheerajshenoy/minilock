@@ -327,3 +327,284 @@ load_svg(const char *path, struct image *img)
     return ok;
 }
 #endif
+
+#ifdef HAVE_AVIF
+bool
+load_avif(const char *path, struct image *img)
+{
+    avifDecoder *dec = avifDecoderCreate();
+    if (!dec)
+        return false;
+
+    avifResult r = avifDecoderSetIOFile(dec, path);
+    if (r == AVIF_RESULT_OK)
+        r = avifDecoderParse(dec);
+    if (r == AVIF_RESULT_OK)
+        r = avifDecoderNextImage(dec); /* first frame only */
+    if (r != AVIF_RESULT_OK)
+    {
+        fprintf(stderr, "AVIF: %s\n", avifResultToString(r));
+        avifDecoderDestroy(dec);
+        return false;
+    }
+
+    uint32_t w = dec->image->width, h = dec->image->height;
+    if (!w || !h || w > 16384 || h > 16384)
+    {
+        fprintf(stderr, "AVIF: unsupported size\n");
+        avifDecoderDestroy(dec);
+        return false;
+    }
+
+    img->width  = w;
+    img->height = h;
+    img->stride = w * 4;
+    img->data   = malloc((size_t)img->stride * h);
+    if (!img->data)
+    {
+        fprintf(stderr, "Failed to allocate memory for image\n");
+        avifDecoderDestroy(dec);
+        return false;
+    }
+
+    avifRGBImage rgb;
+    avifRGBImageSetDefaults(&rgb, dec->image);
+    rgb.format   = AVIF_RGB_FORMAT_BGRA; /* 0xAARRGGBB on little-endian */
+    rgb.depth    = 8;
+    rgb.pixels   = img->data;
+    rgb.rowBytes = img->stride;
+
+    r = avifImageYUVToRGB(dec->image, &rgb);
+    avifDecoderDestroy(dec);
+    if (r != AVIF_RESULT_OK)
+    {
+        fprintf(stderr, "AVIF: %s\n", avifResultToString(r));
+        free(img->data);
+        img->data = NULL;
+        return false;
+    }
+
+    flatten_alpha(img);
+    return true;
+}
+#endif
+
+#ifdef HAVE_HEIF
+bool
+load_heif(const char *path, struct image *img)
+{
+    struct heif_context *ctx = heif_context_alloc();
+    struct heif_image_handle *handle = NULL;
+    struct heif_image *him           = NULL;
+    bool ok                          = false;
+
+    struct heif_error e = heif_context_read_from_file(ctx, path, NULL);
+    if (e.code == heif_error_Ok)
+        e = heif_context_get_primary_image_handle(ctx, &handle);
+    if (e.code == heif_error_Ok) /* applies rotation/mirroring by default */
+        e = heif_decode_image(handle, &him, heif_colorspace_RGB,
+                              heif_chroma_interleaved_RGBA, NULL);
+    if (e.code != heif_error_Ok)
+    {
+        fprintf(stderr, "HEIF: %s\n", e.message);
+        goto out;
+    }
+
+    int w = heif_image_get_width(him, heif_channel_interleaved);
+    int h = heif_image_get_height(him, heif_channel_interleaved);
+    int stride;
+    const uint8_t *src
+        = heif_image_get_plane_readonly(him, heif_channel_interleaved, &stride);
+    if (!src || w <= 0 || h <= 0 || w > 16384 || h > 16384)
+    {
+        fprintf(stderr, "HEIF: unsupported image\n");
+        goto out;
+    }
+
+    img->width  = w;
+    img->height = h;
+    img->stride = (uint32_t)w * 4;
+    img->data   = malloc((size_t)img->stride * h);
+    if (!img->data)
+    {
+        fprintf(stderr, "Failed to allocate memory for image\n");
+        goto out;
+    }
+
+    for (int y = 0; y < h; y++)
+    {
+        const uint8_t *row = src + (size_t)y * stride;
+        uint32_t *dst = (uint32_t *)((char *)img->data + (size_t)y * img->stride);
+        for (int x = 0; x < w; x++)
+            dst[x] = (uint32_t)row[x * 4 + 3] << 24 | row[x * 4] << 16
+                     | row[x * 4 + 1] << 8 | row[x * 4 + 2];
+    }
+
+    flatten_alpha(img);
+    ok = true;
+out:
+    if (him)
+        heif_image_release(him);
+    if (handle)
+        heif_image_handle_release(handle);
+    heif_context_free(ctx);
+    return ok;
+}
+#endif
+
+/* ---------------- BMP (no external library) ---------------- */
+
+static uint32_t
+rd16(const uint8_t *p)
+{
+    return p[0] | p[1] << 8;
+}
+
+static uint32_t
+rd32(const uint8_t *p)
+{
+    return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+/* Extract a masked channel and scale it to 8 bits. */
+static uint32_t
+bmp_channel(uint32_t px, uint32_t mask)
+{
+    if (!mask)
+        return 0;
+    int shift = __builtin_ctz(mask);
+    uint32_t max = mask >> shift;
+    return ((px & mask) >> shift) * 255 / max;
+}
+
+/* Uncompressed BMP: 1/4/8-bit palette, 16/24/32-bit, BI_RGB or BITFIELDS. */
+bool
+load_bmp(const char *path, struct image *img)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+    {
+        fprintf(stderr, "Can't open %s\n", path);
+        return false;
+    }
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    rewind(f);
+
+    uint8_t *buf = size > 54 && size < (256L << 20) ? malloc(size) : NULL;
+    if (!buf || fread(buf, 1, size, f) != (size_t)size)
+    {
+        fprintf(stderr, "BMP: failed to read %s\n", path);
+        free(buf);
+        fclose(f);
+        return false;
+    }
+    fclose(f);
+
+    bool ok = false;
+    uint32_t hdr = rd32(buf + 14), off = rd32(buf + 10);
+    int32_t sw = (int32_t)rd32(buf + 18), sh = (int32_t)rd32(buf + 22);
+    uint32_t bpp = rd16(buf + 28), comp = rd32(buf + 30);
+
+    if (hdr < 40 || 14 + hdr > (uint32_t)size || sw <= 0 || sh == 0
+        || sh == INT32_MIN || sw > 16384 || (sh < 0 ? -sh : sh) > 16384
+        || (comp != 0 && comp != 3) || off > (uint32_t)size)
+    {
+        fprintf(stderr, "BMP: unsupported or corrupt file\n");
+        goto out;
+    }
+    if (bpp != 1 && bpp != 4 && bpp != 8 && bpp != 16 && bpp != 24
+        && bpp != 32)
+    {
+        fprintf(stderr, "BMP: unsupported bit depth %u\n", bpp);
+        goto out;
+    }
+
+    uint32_t w = sw, h = sh < 0 ? -sh : sh;
+    bool top_down = sh < 0;
+
+    uint32_t masks[3] = {0xFF0000, 0x00FF00, 0x0000FF};
+    if (bpp == 16)
+    {
+        masks[0] = 0x7C00;
+        masks[1] = 0x03E0;
+        masks[2] = 0x001F;
+    }
+    if (comp == 3)
+    {
+        if (bpp != 16 && bpp != 32)
+            goto out;
+        if (14 + 40 + 12 > (size_t)size)
+            goto out;
+        for (int i = 0; i < 3; i++)
+            masks[i] = rd32(buf + 54 + i * 4);
+    }
+
+    uint32_t pal[256] = {0};
+    if (bpp <= 8)
+    {
+        uint32_t n = rd32(buf + 46);
+        if (!n || n > (1u << bpp))
+            n = 1u << bpp;
+        const uint8_t *pp = buf + 14 + hdr;
+        if ((size_t)(pp - buf) + (size_t)n * 4 > (size_t)size)
+            goto out;
+        for (uint32_t i = 0; i < n; i++)
+            pal[i] = 0xFF000000u | pp[i * 4 + 2] << 16 | pp[i * 4 + 1] << 8
+                     | pp[i * 4];
+    }
+
+    size_t row_bytes = ((size_t)w * bpp + 31) / 32 * 4;
+    if (row_bytes * h > (size_t)size - off)
+    {
+        fprintf(stderr, "BMP: truncated pixel data\n");
+        goto out;
+    }
+
+    img->width  = w;
+    img->height = h;
+    img->stride = w * 4;
+    img->data   = malloc((size_t)img->stride * h);
+    if (!img->data)
+    {
+        fprintf(stderr, "Failed to allocate memory for image\n");
+        goto out;
+    }
+
+    for (uint32_t y = 0; y < h; y++)
+    {
+        const uint8_t *src = buf + off + row_bytes * (top_down ? y : h - 1 - y);
+        uint32_t *dst
+            = (uint32_t *)((char *)img->data + (size_t)y * img->stride);
+        for (uint32_t x = 0; x < w; x++)
+        {
+            switch (bpp)
+            {
+            case 1:
+                dst[x] = pal[(src[x / 8] >> (7 - x % 8)) & 1];
+                break;
+            case 4:
+                dst[x] = pal[(src[x / 2] >> (x % 2 ? 0 : 4)) & 0xF];
+                break;
+            case 8:
+                dst[x] = pal[src[x]];
+                break;
+            case 24:
+                dst[x] = 0xFF000000u | src[x * 3 + 2] << 16
+                         | src[x * 3 + 1] << 8 | src[x * 3];
+                break;
+            default: /* 16 and 32 */
+            {
+                uint32_t px = bpp == 16 ? rd16(src + x * 2) : rd32(src + x * 4);
+                dst[x] = 0xFF000000u | bmp_channel(px, masks[0]) << 16
+                         | bmp_channel(px, masks[1]) << 8
+                         | bmp_channel(px, masks[2]);
+            }
+            }
+        }
+    }
+    ok = true;
+out:
+    free(buf);
+    return ok;
+}
