@@ -1,4 +1,5 @@
 #include "decoder.h"
+#include <stdlib.h>
 
 
 #ifdef HAVE_PNG

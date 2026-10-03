@@ -1,5 +1,7 @@
-#include "minilock.h"
 #include "decoder.h"
+#include "minilock.h"
+
+#include <math.h>
 
 // Registry listener callbacks when a global object is added or removed
 static void
@@ -87,8 +89,35 @@ create_buffer(struct state *s, uint32_t width, uint32_t height)
         perror("mmap");
         exit(1);
     }
-    for (uint32_t i = 0; i < width * height; i++)
-        px[i] = 0xFF1E1E2E; /* ARGB: opaque dark blue-gray */
+
+    if (s->img_px)
+    {
+        /* "Cover" scaling: fill the screen, crop the overflow. */
+        double scale
+            = fmax((double)width / s->img_w, (double)height / s->img_h);
+        double off_x = (s->img_w * scale - width) / 2.0;
+        double off_y = (s->img_h * scale - height) / 2.0;
+
+        for (uint32_t y = 0; y < height; y++)
+        {
+            int sy = (int)((y + off_y) / scale);
+            if (sy >= s->img_h)
+                sy = s->img_h - 1;
+            for (uint32_t x = 0; x < width; x++)
+            {
+                int sx = (int)((x + off_x) / scale);
+                if (sx >= s->img_w)
+                    sx = s->img_w - 1;
+                px[y * width + x] = s->img_px[sy * s->img_w + sx];
+            }
+        }
+    }
+    else
+    {
+        for (uint32_t i = 0; i < width * height; i++)
+            px[i] = 0xFF1E1E2E;
+    }
+
     munmap(px, size);
 
     struct wl_shm_pool *pool = wl_shm_create_pool(s->shm, fd, size);
@@ -369,6 +398,8 @@ main(int argc, char *argv[])
     printf("Unlocked.\n");
 
     wl_display_disconnect(state.display);
+
+    free(state.img_px);
 
     return 0;
 }
