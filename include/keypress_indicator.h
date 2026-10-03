@@ -18,8 +18,20 @@ render_keypress_indicator(cairo_surface_t *cairo_surface, int width, int height,
                           const struct KeypressIndicatorConfig *config,
                           enum KeypressIndicatorState state);
 
-/* The square (top-left x, y and side) the indicator can touch, for damage. */
+/* The rectangle (top-left x, y, width, height) the indicator can touch in any
+ * state, for damage. */
 void
 keypress_indicator_bounds(int width, int height,
                           const struct KeypressIndicatorConfig *config, int *x,
-                          int *y, int *size);
+                          int *y, int *w, int *h);
+
+/* Parses a `location` value into *out:
+ *   "center", "top", "bottom", "left", "right",
+ *   "top-left", "top-right", "bottom-left", "bottom-right"
+ *   "x:100,y:-40"   pixels from the top-left to the center (negative: from the
+ *                   right/bottom edge)
+ *   "x:25%,y:80%"   percent of the output size
+ *   "x:center"      either axis may be left out or be `center`
+ * Returns NULL on success, otherwise a message describing the problem. */
+const char *
+keypress_location_parse(const char *text, struct Location *out);

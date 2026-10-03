@@ -36,7 +36,13 @@ static struct Config CONFIG = {
                            .color_typing    = 0xFF4DA3FF, /* blue   */
                            .color_verifying = 0xFFFFD60A, /* yellow */
                            .color_failed    = 0xFFFF453A, /* red    */
-                           /* color_idle: see parse_config */},
+                           /* color_idle: see parse_config */
+                           .text_font      = "sans-serif",
+                           .font_size      = 16,
+                           .text_idle      = "Locked",
+                           .text_typing    = "Typing",
+                           .text_verifying = "Verifying",
+                           .text_failed    = "Wrong password"},
 };
 
 static void
@@ -548,10 +554,11 @@ render_output(struct output *o)
                                   &CONFIG.keypress_indicator,
                                   o->state->keypress_indicator_state);
 
-        int ix, iy, isz;
+        int ix, iy, iw, ih;
         keypress_indicator_bounds(o->width, o->height,
-                                  &CONFIG.keypress_indicator, &ix, &iy, &isz);
-        rect_add(&dmg, ix, iy, ix + isz, iy + isz);
+                                  &CONFIG.keypress_indicator, &ix, &iy, &iw,
+                                  &ih);
+        rect_add(&dmg, ix, iy, ix + iw, iy + ih);
     }
     o->indicator_dirty = false;
 
@@ -1012,6 +1019,7 @@ parse_config(void)
         K_BLUR,  /* "box" | "gaussian" | "kawase" | "stack" -> BlurType */
         K_POS,   /* integer >= 1 -> int */
         K_SHAPE, /* "circle" | "square" -> KeypressIndicatorShape */
+        K_LOCATION, /* "top-left", "x:10%,y:-40", ... -> struct Location */
     };
     struct
     {
@@ -1046,8 +1054,34 @@ parse_config(void)
          &CONFIG.keypress_indicator.color_failed},
         {"indicator.keypress.shape", K_SHAPE, &CONFIG.keypress_indicator.shape},
         {"indicator.keypress.radius", K_POS, &CONFIG.keypress_indicator.radius},
+        {"indicator.keypress.location", K_LOCATION,
+         &CONFIG.keypress_indicator.location},
         {"indicator.keypress.hide_length", K_BOOL,
          &CONFIG.keypress_indicator.hide_length},
+        {"indicator.keypress.state_text", K_BOOL,
+         &CONFIG.keypress_indicator.state_text},
+        {"indicator.keypress.font", K_STRING,
+         &CONFIG.keypress_indicator.text_font},
+        {"indicator.keypress.font_size", K_POS,
+         &CONFIG.keypress_indicator.font_size},
+        {"indicator.keypress.text_color", K_COLOR,
+         &CONFIG.keypress_indicator.text_color},
+        {"indicator.keypress.text_color_idle", K_COLOR,
+         &CONFIG.keypress_indicator.text_color_idle},
+        {"indicator.keypress.text_color_typing", K_COLOR,
+         &CONFIG.keypress_indicator.text_color_typing},
+        {"indicator.keypress.text_color_verifying", K_COLOR,
+         &CONFIG.keypress_indicator.text_color_verifying},
+        {"indicator.keypress.text_color_failed", K_COLOR,
+         &CONFIG.keypress_indicator.text_color_failed},
+        {"indicator.keypress.text_idle", K_STRING,
+         &CONFIG.keypress_indicator.text_idle},
+        {"indicator.keypress.text_typing", K_STRING,
+         &CONFIG.keypress_indicator.text_typing},
+        {"indicator.keypress.text_verifying", K_STRING,
+         &CONFIG.keypress_indicator.text_verifying},
+        {"indicator.keypress.text_failed", K_STRING,
+         &CONFIG.keypress_indicator.text_failed},
         {0, 0, 0}};
 
     for (int i = 0; entries[i].key; i++)
@@ -1077,6 +1111,8 @@ parse_config(void)
                 *(bool *)entries[i].dest = datum.u.boolean;
                 break;
             case K_INT:
+                if (datum.u.int64 < INT_MIN / 2 || datum.u.int64 > INT_MAX / 2)
+                    toml_error("Number out of range: ", entries[i].key);
                 *(int *)entries[i].dest = (int)datum.u.int64;
                 break;
             case K_POS:
@@ -1084,6 +1120,18 @@ parse_config(void)
                     toml_error("Must be between 1 and 1000: ", entries[i].key);
                 *(int *)entries[i].dest = (int)datum.u.int64;
                 break;
+            case K_LOCATION:
+            {
+                const char *err = keypress_location_parse(
+                    datum.u.s, (struct Location *)entries[i].dest);
+                if (err)
+                {
+                    fprintf(stderr, "ERROR: indicator.keypress.location: %s\n",
+                            err);
+                    exit(1);
+                }
+                break;
+            }
             case K_SHAPE:
             {
                 static const struct
@@ -1091,7 +1139,9 @@ parse_config(void)
                     const char *name;
                     enum KeypressIndicatorShape shape;
                 } shapes[]
-                    = {{"circle", SHAPE_CIRCLE}, {"square", SHAPE_SQUARE}};
+                    = {{"circle", SHAPE_CIRCLE},
+                       {"square", SHAPE_SQUARE},
+                       {"none", SHAPE_NONE}};
 
                 bool found = false;
                 for (size_t t = 0; t < sizeof(shapes) / sizeof(*shapes); t++)
@@ -1102,7 +1152,7 @@ parse_config(void)
                         found = true;
                     }
                 if (!found)
-                    toml_error("Unknown shape (use circle or square) for key: ",
+                    toml_error("Unknown shape (use circle, square or none) for key: ",
                                entries[i].key);
                 break;
             }
@@ -1168,6 +1218,17 @@ finish_config(void)
     struct KeypressIndicatorConfig *ki = &CONFIG.keypress_indicator;
     if (!ki->color_idle)
         ki->color_idle = ki->color ? ki->color : 0xFFFFFFFF;
+
+    /* No shape means the indicator is the text. If state_text wasn't asked
+     * for, turn it on and draw it in the plain `color` for every state.
+     * (With state_text = true the text follows the state colors instead; a
+     * text_color or per-state text_color_* still wins in both cases.) */
+    if (ki->shape == SHAPE_NONE && !ki->state_text)
+    {
+        ki->state_text = true;
+        if (ki->color && !ki->text_color)
+            ki->text_color = ki->color;
+    }
 }
 
 static void
