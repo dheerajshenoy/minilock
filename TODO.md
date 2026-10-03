@@ -16,6 +16,7 @@
     - [x] AVIF
     - [x] HEIC
     - [x] BMP
+- [x] Tint for images
 
 - [ ] Visual feedback
 - [ ] Config file support
