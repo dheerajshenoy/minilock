@@ -93,6 +93,9 @@ free_image(struct state *state)
     if (!state->img)
         return;
     free(state->img->data);
+#ifdef HAVE_GIF
+    free(state->img->delay_ms);
+#endif
     free(state->img);
     state->img = NULL;
 }

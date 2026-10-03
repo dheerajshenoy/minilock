@@ -614,46 +614,97 @@ out:
 bool
 load_gif(const char *path, struct image *img)
 {
-    GifFileType *type = DGifOpenFileName(path, NULL);
-
-    if (!type)
+    int err;
+    GifFileType *gif = DGifOpenFileName(path, &err);
+    if (!gif)
     {
-        fprintf(stderr, "GIF: failed to open %s\n", path);
+        fprintf(stderr, "GIF: %s\n", GifErrorString(err));
         return false;
     }
 
-    if (DGifSlurp(type) != GIF_OK)
+    if (DGifSlurp(gif) != GIF_OK || gif->ImageCount < 1)
     {
         fprintf(stderr, "GIF: failed to read %s\n", path);
-        DGifCloseFile(type, NULL);
-        return false;
+        goto fail;
     }
 
-    img->w      = type->SWidth;
-    img->h      = type->SHeight;
+    if (gif->SWidth <= 0 || gif->SHeight <= 0 || gif->SWidth > 16384
+        || gif->SHeight > 16384)
+    {
+        fprintf(stderr, "GIF: unsupported size\n");
+        goto fail;
+    }
+
+    img->w      = gif->SWidth;
+    img->h      = gif->SHeight;
     img->stride = img->w * 4;
     img->data   = malloc((size_t)img->stride * img->h);
-    if (!img->data)
+    img->n_frames      = gif->ImageCount;
+    img->current_frame = 0;
+    img->delay_ms      = calloc(img->n_frames, sizeof(float));
+    if (!img->data || !img->delay_ms)
     {
         fprintf(stderr, "Failed to allocate memory for image\n");
-        DGifCloseFile(type, NULL);
-        return false;
+        goto fail;
     }
 
-    for (int y = 0; y < img->h; y++)
+    /* Frame delays (in ms). A frame without a graphics control block is
+     * legal and just has no delay or transparency. */
+    int transparent = NO_TRANSPARENT_COLOR;
+    for (int i = 0; i < gif->ImageCount; i++)
     {
-        for (int x = 0; x < img->w; x++)
+        GraphicsControlBlock gcb;
+        if (DGifSavedExtensionToGCB(gif, i, &gcb) == GIF_OK)
         {
-            int idx = type->SavedImages[0].RasterBits[y * img->w + x];
-            GifColorType color = type->SColorMap->Colors[idx];
-            uint32_t pixel
-                = 0xFF000000u | color.Red << 16 | color.Green << 8 | color.Blue;
-            ((uint32_t *)img->data)[y * img->w + x] = pixel;
+            img->delay_ms[i] = gcb.DelayTime * 10.0f;
+            if (i == 0)
+                transparent = gcb.TransparentColor;
         }
     }
 
-    DGifCloseFile(type, NULL);
+    /* Only the first frame is drawn, over an opaque fallback background. */
+    const uint32_t bg = 0xFF1E1E2E;
+    uint32_t *px      = img->data;
+    for (size_t i = 0; i < (size_t)img->w * img->h; i++)
+        px[i] = bg;
 
+    const SavedImage *frame = &gif->SavedImages[0];
+    const ColorMapObject *cmap
+        = frame->ImageDesc.ColorMap ? frame->ImageDesc.ColorMap : gif->SColorMap;
+    if (!cmap || !frame->RasterBits)
+    {
+        fprintf(stderr, "GIF: frame has no color map or pixels\n");
+        goto fail;
+    }
+
+    for (int y = 0; y < frame->ImageDesc.Height; y++)
+    {
+        int dy = frame->ImageDesc.Top + y;
+        if (dy < 0 || dy >= (int)img->h)
+            continue;
+        for (int x = 0; x < frame->ImageDesc.Width; x++)
+        {
+            int dx = frame->ImageDesc.Left + x;
+            if (dx < 0 || dx >= (int)img->w)
+                continue;
+            int c = frame->RasterBits[(size_t)y * frame->ImageDesc.Width + x];
+            if (c == transparent || c >= cmap->ColorCount)
+                continue;
+            const GifColorType *col = &cmap->Colors[c];
+            px[(size_t)dy * img->w + dx] = 0xFF000000u | col->Red << 16
+                                           | col->Green << 8 | col->Blue;
+        }
+    }
+
+    DGifCloseFile(gif, &err);
     return true;
+
+fail:
+    free(img->delay_ms);
+    free(img->data);
+    img->delay_ms = NULL;
+    img->data     = NULL;
+    DGifCloseFile(gif, &err);
+    return false;
 }
 #endif
