@@ -9,7 +9,12 @@ struct image
     uint32_t w, h;
     uint32_t stride;
     void *data;
+
+#ifdef HAVE_GIF
     int n_frames;
+    int current_frame;
+    float *delay_ms;
+#endif
 };
 
 #ifdef HAVE_JPEG
@@ -72,3 +77,9 @@ load_heif(const char *path, struct image *img);
 
 bool
 load_bmp(const char *path, struct image *img);
+
+#ifdef HAVE_GIF
+    #include <gif_lib.h>
+bool
+load_gif(const char *path, struct image *img);
+#endif

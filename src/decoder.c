@@ -72,11 +72,11 @@ load_jpeg(const char *path, struct image *img)
     cinfo.out_color_space = JCS_RGB; /* also converts grayscale/CMYK */
     (void)jpeg_start_decompress(&cinfo);
 
-    img->w  = cinfo.output_width;
-    img->h = cinfo.output_height;
+    img->w      = cinfo.output_width;
+    img->h      = cinfo.output_height;
     img->stride = img->w * 4; /* XRGB8888, native-endian */
 
-    img->data = malloc((size_t)img->stride * img->h);
+    img->data    = malloc((size_t)img->stride * img->h);
     JSAMPROW row = malloc((size_t)img->w * 3);
 
     if (!img->data || !row)
@@ -125,8 +125,8 @@ load_png(const char *path, struct image *img)
 
     /* BGRA bytes == 0xAARRGGBB as a little-endian uint32. */
     png.format  = PNG_FORMAT_BGRA;
-    img->w  = png.width;
-    img->h = png.height;
+    img->w      = png.width;
+    img->h      = png.height;
     img->stride = png.width * 4;
     img->data   = malloc((size_t)img->stride * img->h);
     if (!img->data)
@@ -183,8 +183,8 @@ load_webp(const char *path, struct image *img)
         return false;
     }
 
-    img->w  = w;
-    img->h = h;
+    img->w      = w;
+    img->h      = h;
     img->stride = (uint32_t)w * 4;
     img->data   = malloc((size_t)img->stride * h);
     if (!img->data)
@@ -195,8 +195,8 @@ load_webp(const char *path, struct image *img)
     }
 
     /* BGRA bytes == 0xAARRGGBB as a little-endian uint32. */
-    if (!WebPDecodeBGRAInto(buf, size, img->data,
-                            (size_t)img->stride * h, img->stride))
+    if (!WebPDecodeBGRAInto(buf, size, img->data, (size_t)img->stride * h,
+                            img->stride))
     {
         fprintf(stderr, "WebP: decode failed\n");
         free(buf);
@@ -226,8 +226,8 @@ load_tiff(const char *path, struct image *img)
     TIFFGetField(tif, TIFFTAG_IMAGEWIDTH, &w);
     TIFFGetField(tif, TIFFTAG_IMAGELENGTH, &h);
 
-    img->w  = w;
-    img->h = h;
+    img->w      = w;
+    img->h      = h;
     img->stride = w * 4;
     img->data   = w && h ? malloc((size_t)img->stride * h) : NULL;
     if (!img->data)
@@ -263,8 +263,8 @@ load_tiff(const char *path, struct image *img)
 bool
 load_svg(const char *path, struct image *img)
 {
-    GError *err       = NULL;
-    RsvgHandle *svg   = rsvg_handle_new_from_file(path, &err);
+    GError *err     = NULL;
+    RsvgHandle *svg = rsvg_handle_new_from_file(path, &err);
     if (!svg)
     {
         fprintf(stderr, "SVG: %s\n", err ? err->message : "load failed");
@@ -292,8 +292,8 @@ load_svg(const char *path, struct image *img)
         return false;
     }
 
-    img->w  = w;
-    img->h = h;
+    img->w      = w;
+    img->h      = h;
     img->stride = (uint32_t)w * 4;
     img->data   = calloc(h, img->stride);
     if (!img->data)
@@ -356,8 +356,8 @@ load_avif(const char *path, struct image *img)
         return false;
     }
 
-    img->w  = w;
-    img->h = h;
+    img->w      = w;
+    img->h      = h;
     img->stride = w * 4;
     img->data   = malloc((size_t)img->stride * h);
     if (!img->data)
@@ -393,7 +393,7 @@ load_avif(const char *path, struct image *img)
 bool
 load_heif(const char *path, struct image *img)
 {
-    struct heif_context *ctx = heif_context_alloc();
+    struct heif_context *ctx         = heif_context_alloc();
     struct heif_image_handle *handle = NULL;
     struct heif_image *him           = NULL;
     bool ok                          = false;
@@ -421,8 +421,8 @@ load_heif(const char *path, struct image *img)
         goto out;
     }
 
-    img->w  = w;
-    img->h = h;
+    img->w      = w;
+    img->h      = h;
     img->stride = (uint32_t)w * 4;
     img->data   = malloc((size_t)img->stride * h);
     if (!img->data)
@@ -434,7 +434,8 @@ load_heif(const char *path, struct image *img)
     for (int y = 0; y < h; y++)
     {
         const uint8_t *row = src + (size_t)y * stride;
-        uint32_t *dst = (uint32_t *)((char *)img->data + (size_t)y * img->stride);
+        uint32_t *dst
+            = (uint32_t *)((char *)img->data + (size_t)y * img->stride);
         for (int x = 0; x < w; x++)
             dst[x] = (uint32_t)row[x * 4 + 3] << 24 | row[x * 4] << 16
                      | row[x * 4 + 1] << 8 | row[x * 4 + 2];
@@ -472,7 +473,7 @@ bmp_channel(uint32_t px, uint32_t mask)
 {
     if (!mask)
         return 0;
-    int shift = __builtin_ctz(mask);
+    int shift    = __builtin_ctz(mask);
     uint32_t max = mask >> shift;
     return ((px & mask) >> shift) * 255 / max;
 }
@@ -501,7 +502,7 @@ load_bmp(const char *path, struct image *img)
     }
     fclose(f);
 
-    bool ok = false;
+    bool ok      = false;
     uint32_t hdr = rd32(buf + 14), off = rd32(buf + 10);
     int32_t sw = (int32_t)rd32(buf + 18), sh = (int32_t)rd32(buf + 22);
     uint32_t bpp = rd16(buf + 28), comp = rd32(buf + 30);
@@ -513,8 +514,7 @@ load_bmp(const char *path, struct image *img)
         fprintf(stderr, "BMP: unsupported or corrupt file\n");
         goto out;
     }
-    if (bpp != 1 && bpp != 4 && bpp != 8 && bpp != 16 && bpp != 24
-        && bpp != 32)
+    if (bpp != 1 && bpp != 4 && bpp != 8 && bpp != 16 && bpp != 24 && bpp != 32)
     {
         fprintf(stderr, "BMP: unsupported bit depth %u\n", bpp);
         goto out;
@@ -561,8 +561,8 @@ load_bmp(const char *path, struct image *img)
         goto out;
     }
 
-    img->w  = w;
-    img->h = h;
+    img->w      = w;
+    img->h      = h;
     img->stride = w * 4;
     img->data   = malloc((size_t)img->stride * h);
     if (!img->data)
@@ -580,26 +580,27 @@ load_bmp(const char *path, struct image *img)
         {
             switch (bpp)
             {
-            case 1:
-                dst[x] = pal[(src[x / 8] >> (7 - x % 8)) & 1];
-                break;
-            case 4:
-                dst[x] = pal[(src[x / 2] >> (x % 2 ? 0 : 4)) & 0xF];
-                break;
-            case 8:
-                dst[x] = pal[src[x]];
-                break;
-            case 24:
-                dst[x] = 0xFF000000u | src[x * 3 + 2] << 16
-                         | src[x * 3 + 1] << 8 | src[x * 3];
-                break;
-            default: /* 16 and 32 */
-            {
-                uint32_t px = bpp == 16 ? rd16(src + x * 2) : rd32(src + x * 4);
-                dst[x] = 0xFF000000u | bmp_channel(px, masks[0]) << 16
-                         | bmp_channel(px, masks[1]) << 8
-                         | bmp_channel(px, masks[2]);
-            }
+                case 1:
+                    dst[x] = pal[(src[x / 8] >> (7 - x % 8)) & 1];
+                    break;
+                case 4:
+                    dst[x] = pal[(src[x / 2] >> (x % 2 ? 0 : 4)) & 0xF];
+                    break;
+                case 8:
+                    dst[x] = pal[src[x]];
+                    break;
+                case 24:
+                    dst[x] = 0xFF000000u | src[x * 3 + 2] << 16
+                             | src[x * 3 + 1] << 8 | src[x * 3];
+                    break;
+                default: /* 16 and 32 */
+                {
+                    uint32_t px
+                        = bpp == 16 ? rd16(src + x * 2) : rd32(src + x * 4);
+                    dst[x] = 0xFF000000u | bmp_channel(px, masks[0]) << 16
+                             | bmp_channel(px, masks[1]) << 8
+                             | bmp_channel(px, masks[2]);
+                }
             }
         }
     }
@@ -608,3 +609,51 @@ out:
     free(buf);
     return ok;
 }
+
+#ifdef HAVE_GIF
+bool
+load_gif(const char *path, struct image *img)
+{
+    GifFileType *type = DGifOpenFileName(path, NULL);
+
+    if (!type)
+    {
+        fprintf(stderr, "GIF: failed to open %s\n", path);
+        return false;
+    }
+
+    if (DGifSlurp(type) != GIF_OK)
+    {
+        fprintf(stderr, "GIF: failed to read %s\n", path);
+        DGifCloseFile(type, NULL);
+        return false;
+    }
+
+    img->w      = type->SWidth;
+    img->h      = type->SHeight;
+    img->stride = img->w * 4;
+    img->data   = malloc((size_t)img->stride * img->h);
+    if (!img->data)
+    {
+        fprintf(stderr, "Failed to allocate memory for image\n");
+        DGifCloseFile(type, NULL);
+        return false;
+    }
+
+    for (int y = 0; y < img->h; y++)
+    {
+        for (int x = 0; x < img->w; x++)
+        {
+            int idx = type->SavedImages[0].RasterBits[y * img->w + x];
+            GifColorType color = type->SColorMap->Colors[idx];
+            uint32_t pixel
+                = 0xFF000000u | color.Red << 16 | color.Green << 8 | color.Blue;
+            ((uint32_t *)img->data)[y * img->w + x] = pixel;
+        }
+    }
+
+    DGifCloseFile(type, NULL);
+
+    return true;
+}
+#endif

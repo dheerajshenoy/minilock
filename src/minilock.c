@@ -75,6 +75,10 @@ load_image(const char *path, struct state *state)
     if (!memcmp(magic, "\x89PNG\r\n\x1a\n", 8))
         ok = load_png(path, state->img);
 #endif
+#ifdef HAVE_GIF
+    if (magic[0] == 'G' && magic[1] == 'I' && magic[2] == 'F')
+        ok = load_gif(path, state->img);
+#endif
     if (!ok)
     {
         fprintf(stderr, "Could not load image: %s\n", path);
