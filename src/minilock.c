@@ -1,4 +1,5 @@
 #include "minilock.h"
+#include "config.h"
 
 #include "decoder.h"
 
@@ -13,20 +14,36 @@
 #include <unistd.h>
 #include <xkbcommon/xkbcommon.h>
 
+static void
+free_image(struct state *state);
+
 bool
 load_image(const char *path, struct state *state)
 {
+    state->img = calloc(1, sizeof(*state->img));
+    if (!state->img)
+        return false;
+
+    bool ok = false;
 #ifdef HAVE_JPEG
-    return load_jpeg(path, state->img);
+    ok = load_jpeg(path, state->img);
 #endif
-    fprintf(stderr, "Could not load image: %s\n", path);
-    return false;
+    if (!ok)
+    {
+        fprintf(stderr, "Could not load image: %s\n", path);
+        free_image(state);
+    }
+    return ok;
 }
 
 void
 free_image(struct state *state)
 {
+    if (!state->img)
+        return;
+    free(state->img->data);
     free(state->img);
+    state->img = NULL;
 }
 
 /* ---------------- lock ---------------- */
@@ -81,8 +98,40 @@ create_buffer(struct state *s, uint32_t width, uint32_t height)
         perror("mmap");
         exit(1);
     }
-    for (uint32_t i = 0; i < width * height; i++)
-        px[i] = 0xFF1E1E2E; /* ARGB: opaque dark blue-gray */
+
+    const struct image *img = s->img;
+    if (img && img->data && img->width && img->height)
+    {
+        /* Scale to cover the output, centered, nearest-neighbour. */
+        uint64_t sw = width, sh = height;
+        bool wide   = sw * img->height > sh * img->width;
+        uint64_t dw = wide ? sw : (sh * img->width + img->height - 1) / img->height;
+        uint64_t dh = wide ? (sw * img->height + img->width - 1) / img->width : sh;
+        int64_t ox  = ((int64_t)dw - (int64_t)width) / 2;
+        int64_t oy  = ((int64_t)dh - (int64_t)height) / 2;
+
+        for (uint32_t y = 0; y < height; y++)
+        {
+            uint64_t sy = (uint64_t)(y + oy) * img->height / dh;
+            if (sy >= img->height)
+                sy = img->height - 1;
+            const uint32_t *src
+                = (const uint32_t *)((const char *)img->data + sy * img->stride);
+            for (uint32_t x = 0; x < width; x++)
+            {
+                uint64_t sx = (uint64_t)(x + ox) * img->width / dw;
+                if (sx >= img->width)
+                    sx = img->width - 1;
+                px[(size_t)y * width + x] = src[sx];
+            }
+        }
+    }
+    else
+    {
+        for (uint32_t i = 0; i < width * height; i++)
+            px[i] = 0xFF1E1E2E; /* ARGB: opaque dark blue-gray */
+    }
+
     munmap(px, size);
 
     struct wl_shm_pool *pool = wl_shm_create_pool(s->shm, fd, size);
@@ -315,7 +364,7 @@ static const struct wl_registry_listener registry_listener = {
 };
 
 int
-init(int argc, char *argv[])
+minilock_init(int argc, char *argv[])
 {
     struct state state = {0};
 
@@ -325,6 +374,8 @@ init(int argc, char *argv[])
         {
             fprintf(stderr, "Failed to load image: %s\n", argv[1]);
             return 1;
+        } else {
+            printf("Loaded image: %s\n", argv[1]);
         }
     }
 

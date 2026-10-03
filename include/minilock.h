@@ -45,4 +45,4 @@ struct state
 };
 
 int
-init(int argc, char *argv[]);
+minilock_init(int argc, char *argv[]);
