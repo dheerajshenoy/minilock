@@ -1,26 +1,10 @@
 #pragma once
 
-#define _GNU_SOURCE
-#include "decoder.h"
+#define _GNU_SOURCE /* memfd_create, explicit_bzero: must come first */
 #include "ext-session-lock-v1-client-protocol.h"
 
-#include <fcntl.h>
-#include <poll.h>
-#include <pwd.h>
-#include <security/pam_appl.h>
 #include <stdbool.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/mman.h>
-#include <time.h>
-#include <unistd.h>
 #include <wayland-client.h>
-#include <xkbcommon/xkbcommon.h>
-
-#define STR_(x) #x
-#define STR(x) STR_(x)
 
 struct state; /* forward declaration */
 
@@ -32,7 +16,6 @@ struct output
     struct state *state;
     struct wl_surface *surface;
     struct ext_session_lock_surface_v1 *lock_surface;
-    uint32_t width, height;
 };
 
 struct state
@@ -46,6 +29,7 @@ struct state
     struct output *outputs;
     struct ext_session_lock_v1 *lock;
     bool locked, finished;
+
     struct wl_keyboard *keyboard;
     struct xkb_context *xkb_ctx;
     struct xkb_keymap *xkb_keymap;
@@ -53,7 +37,4 @@ struct state
     char password[256];
     size_t pw_len;
     bool authenticated;
-    struct image img;
-    int cur_frame;
-    int64_t next_frame_ms;
 };

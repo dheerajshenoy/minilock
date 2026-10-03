@@ -1,83 +1,38 @@
 #include "minilock.h"
+#include <pwd.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <sys/poll.h>
+#include <time.h>
+#include <unistd.h>
+#include <security/pam_appl.h>
+#include <xkbcommon/xkbcommon.h>
 
-#include <math.h>
-
-// Registry listener callbacks when a global object is added or removed
-static void
-registry_global(void *data, struct wl_registry *registry, uint32_t name,
-                const char *interface, uint32_t version)
-{
-    struct state *s = data;
-
-    if (strcmp(interface, wl_compositor_interface.name) == 0)
-    {
-        s->compositor
-            = wl_registry_bind(registry, name, &wl_compositor_interface, 4);
-    }
-    else if (strcmp(interface, wl_shm_interface.name) == 0)
-    {
-        s->shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
-    }
-    else if (strcmp(interface, wl_seat_interface.name) == 0)
-    {
-        s->seat = wl_registry_bind(registry, name, &wl_seat_interface, 5);
-    }
-    else if (strcmp(interface, wl_output_interface.name) == 0)
-    {
-        struct output *o = calloc(1, sizeof(*o));
-        o->name          = name;
-        o->state         = s;
-        o->wl_output
-            = wl_registry_bind(registry, name, &wl_output_interface, 2);
-        o->next    = s->outputs;
-        s->outputs = o;
-    }
-    else if (strcmp(interface, ext_session_lock_manager_v1_interface.name) == 0)
-    {
-        s->lock_manager = wl_registry_bind(
-            registry, name, &ext_session_lock_manager_v1_interface, 1);
-    }
-}
-
-/* Monitor unplug handling: we'll deal with this later. */
-static void
-registry_global_remove(void *data, struct wl_registry *registry, uint32_t name)
-{
-}
-
-static const struct wl_registry_listener registry_listener = {
-    .global        = registry_global,
-    .global_remove = registry_global_remove,
-};
+/* ---------------- lock ---------------- */
 
 static void
-lock_locked(void *data, struct ext_session_lock_v1 *lock)
+handle_locked(void *data, struct ext_session_lock_v1 *lock)
 {
-    struct state *s = data;
-    s->locked       = true;
+    struct state *state = data;
+    state->locked       = true;
 }
 
 static void
-lock_finished(void *data, struct ext_session_lock_v1 *lock)
+handle_finished(void *data, struct ext_session_lock_v1 *lock)
 {
-    struct state *s = data;
-    s->finished     = true;
+    struct state *state = data;
+    state->finished     = true;
 }
 
 static const struct ext_session_lock_v1_listener lock_listener = {
-    .locked   = lock_locked,
-    .finished = lock_finished,
+    .locked   = handle_locked,
+    .finished = handle_finished,
 };
 
-static int64_t
-now_ms(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-}
+/* ---------------- buffers and surfaces ---------------- */
 
-/* Free each buffer once the compositor is done with it. */
 static void
 buffer_release(void *data, struct wl_buffer *buf)
 {
@@ -89,12 +44,12 @@ static const struct wl_buffer_listener buffer_listener = {
 };
 
 static struct wl_buffer *
-create_buffer(struct state *s, uint32_t width, uint32_t height, int frame)
+create_buffer(struct state *s, uint32_t width, uint32_t height)
 {
     int stride = width * 4;
     int size   = stride * height;
 
-    int fd = memfd_create(STR(PROJECT_NAME) "-buf", 0);
+    int fd = memfd_create(PROJECT_NAME "-buf", 0);
     if (fd < 0 || ftruncate(fd, size) < 0)
     {
         perror("shm");
@@ -107,37 +62,8 @@ create_buffer(struct state *s, uint32_t width, uint32_t height, int frame)
         perror("mmap");
         exit(1);
     }
-
-    if (s->img.n_frames > 0)
-    {
-        uint32_t *src = s->img.frames[frame];
-        int iw = s->img.w, ih = s->img.h;
-
-        /* "Cover" scaling: fill the screen, crop the overflow. */
-        double scale = fmax((double)width / iw, (double)height / ih);
-        double off_x = (iw * scale - width) / 2.0;
-        double off_y = (ih * scale - height) / 2.0;
-
-        for (uint32_t y = 0; y < height; y++)
-        {
-            int sy = (int)((y + off_y) / scale);
-            if (sy >= ih)
-                sy = ih - 1;
-            for (uint32_t x = 0; x < width; x++)
-            {
-                int sx = (int)((x + off_x) / scale);
-                if (sx >= iw)
-                    sx = iw - 1;
-                px[y * width + x] = src[sy * iw + sx];
-            }
-        }
-    }
-    else
-    {
-        for (uint32_t i = 0; i < width * height; i++)
-            px[i] = 0xFF1E1E2E;
-    }
-
+    for (uint32_t i = 0; i < width * height; i++)
+        px[i] = 0xFF1E1E2E; /* ARGB: opaque dark blue-gray */
     munmap(px, size);
 
     struct wl_shm_pool *pool = wl_shm_create_pool(s->shm, fd, size);
@@ -145,21 +71,9 @@ create_buffer(struct state *s, uint32_t width, uint32_t height, int frame)
         pool, 0, width, height, stride, WL_SHM_FORMAT_ARGB8888);
     wl_shm_pool_destroy(pool);
     close(fd);
+
     wl_buffer_add_listener(buf, &buffer_listener, NULL);
     return buf;
-}
-
-static void
-draw_output(struct output *o)
-{
-    if (!o->width || !o->height)
-        return;
-
-    struct wl_buffer *buf
-        = create_buffer(o->state, o->width, o->height, o->state->cur_frame);
-    wl_surface_attach(o->surface, buf, 0, 0);
-    wl_surface_damage_buffer(o->surface, 0, 0, o->width, o->height);
-    wl_surface_commit(o->surface);
 }
 
 static void
@@ -167,16 +81,20 @@ surface_configure(void *data, struct ext_session_lock_surface_v1 *ls,
                   uint32_t serial, uint32_t width, uint32_t height)
 {
     struct output *o = data;
-    o->width         = width;
-    o->height        = height;
 
     ext_session_lock_surface_v1_ack_configure(ls, serial);
-    draw_output(o);
+
+    struct wl_buffer *buf = create_buffer(o->state, width, height);
+    wl_surface_attach(o->surface, buf, 0, 0);
+    wl_surface_damage_buffer(o->surface, 0, 0, width, height);
+    wl_surface_commit(o->surface);
 }
 
 static const struct ext_session_lock_surface_v1_listener surface_listener = {
     .configure = surface_configure,
 };
+
+/* ---------------- PAM ---------------- */
 
 static int
 pam_conv_cb(int n, const struct pam_message **msg, struct pam_response **resp,
@@ -191,9 +109,7 @@ pam_conv_cb(int n, const struct pam_message **msg, struct pam_response **resp,
     {
         if (msg[i]->msg_style == PAM_PROMPT_ECHO_OFF
             || msg[i]->msg_style == PAM_PROMPT_ECHO_ON)
-        {
-            r[i].resp = strdup(pw); /* PAM frees this itself */
-        }
+            r[i].resp = strdup(pw); /* PAM frees this */
     }
     *resp = r;
     return PAM_SUCCESS;
@@ -208,16 +124,16 @@ check_password(const char *pw)
 
     struct pam_conv conv = {pam_conv_cb, (void *)pw};
     pam_handle_t *h      = NULL;
+    /* PROJECT_NAME is already a quoted string from CMake. */
     if (pam_start(PROJECT_NAME, pwd->pw_name, &conv, &h) != PAM_SUCCESS)
         return false;
 
     int rc = pam_authenticate(h, 0);
-    if (rc != PAM_SUCCESS)
-        fprintf(stderr, "PAM: %s (service: %s)\n", pam_strerror(h, rc),
-                STR(PROJECT_NAME));
     pam_end(h, rc);
     return rc == PAM_SUCCESS;
 }
+
+/* ---------------- keyboard ---------------- */
 
 static void
 kb_keymap(void *data, struct wl_keyboard *kb, uint32_t format, int fd,
@@ -268,14 +184,13 @@ kb_key(void *data, struct wl_keyboard *kb, uint32_t serial, uint32_t time,
     xkb_keycode_t code = key + 8;
     xkb_keysym_t sym   = xkb_state_key_get_one_sym(s->xkb_state, code);
 
-    // Handle password input and authentication
     if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter)
     {
         s->password[s->pw_len] = '\0';
         if (check_password(s->password))
             s->authenticated = true;
         else
-            printf("Wrong password\n");
+            fprintf(stderr, "Wrong password\n");
         explicit_bzero(s->password, sizeof(s->password));
         s->pw_len = 0;
     }
@@ -329,28 +244,73 @@ static const struct wl_keyboard_listener keyboard_listener = {
     .repeat_info = kb_repeat_info,
 };
 
+/* ---------------- registry ---------------- */
+
+static void
+handle_global(void *data, struct wl_registry *registry, uint32_t name,
+              const char *interface, uint32_t version)
+{
+    struct state *state = data;
+
+    if (strcmp(interface, wl_compositor_interface.name) == 0)
+    {
+        state->compositor
+            = wl_registry_bind(registry, name, &wl_compositor_interface, 4);
+    }
+    else if (strcmp(interface, wl_shm_interface.name) == 0)
+    {
+        state->shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
+    }
+    else if (strcmp(interface, wl_seat_interface.name) == 0)
+    {
+        state->seat = wl_registry_bind(registry, name, &wl_seat_interface, 5);
+    }
+    else if (strcmp(interface, wl_output_interface.name) == 0)
+    {
+        struct output *o = calloc(1, sizeof(*o));
+        if (!o)
+            return;
+        o->name  = name;
+        o->state = state;
+        o->wl_output
+            = wl_registry_bind(registry, name, &wl_output_interface, 2);
+        o->next        = state->outputs;
+        state->outputs = o;
+    }
+    else if (strcmp(interface, ext_session_lock_manager_v1_interface.name) == 0)
+    {
+        state->lock_manager = wl_registry_bind(
+            registry, name, &ext_session_lock_manager_v1_interface, 1);
+    }
+}
+
+static void
+handle_global_remove(void *data, struct wl_registry *registry, uint32_t name)
+{
+    /* Monitor unplug handling comes later. */
+}
+
+static const struct wl_registry_listener registry_listener = {
+    .global        = handle_global,
+    .global_remove = handle_global_remove,
+};
+
+/* ---------------- main ---------------- */
+
 int
 main(int argc, char *argv[])
 {
     struct state state = {0};
 
-    if (argc > 1)
-    {
-        if (!load_image(argv[1], &state.img))
-            return 1;
-    }
-
     state.display = wl_display_connect(NULL);
     if (!state.display)
     {
-        fprintf(stderr, "Cannot connect to Wayland display\n");
+        fprintf(stderr, "Failed to connect to Wayland display\n");
         return 1;
     }
 
     state.registry = wl_display_get_registry(state.display);
     wl_registry_add_listener(state.registry, &registry_listener, &state);
-
-    /* Block until the compositor has sent all globals. */
     wl_display_roundtrip(state.display);
 
     if (!state.compositor || !state.shm || !state.seat)
@@ -363,18 +323,22 @@ main(int argc, char *argv[])
         fprintf(stderr, "Compositor does not support ext-session-lock-v1\n");
         return 1;
     }
+    if (!state.outputs)
+    {
+        fprintf(stderr, "No outputs found\n");
+        return 1;
+    }
 
-    int n = 0;
-    for (struct output *o = state.outputs; o; o = o->next)
-        n++;
-
-    state.lock     = ext_session_lock_manager_v1_lock(state.lock_manager);
+    /* Keyboard + xkb. */
     state.xkb_ctx  = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
     state.keyboard = wl_seat_get_keyboard(state.seat);
-
     wl_keyboard_add_listener(state.keyboard, &keyboard_listener, &state);
+
+    /* Lock. */
+    state.lock = ext_session_lock_manager_v1_lock(state.lock_manager);
     ext_session_lock_v1_add_listener(state.lock, &lock_listener, &state);
 
+    /* One surface + lock surface per output. */
     for (struct output *o = state.outputs; o; o = o->next)
     {
         o->surface      = wl_compositor_create_surface(state.compositor);
@@ -398,52 +362,29 @@ main(int argc, char *argv[])
         fprintf(stderr, "Lock denied (another locker running?)\n");
         ext_session_lock_v1_destroy(state.lock);
         wl_display_roundtrip(state.display);
+        wl_display_disconnect(state.display);
         return 1;
     }
 
-    printf("Session locked!\n");
     wl_display_roundtrip(state.display);
-
-    bool animated = state.img.n_frames > 1;
-    if (animated)
-        state.next_frame_ms = now_ms() + state.img.delay_ms[0];
-
     printf("Locked. Enter your password.\n");
+
     time_t end = time(NULL) + 60; /* temporary safety timeout */
     while (!state.authenticated && time(NULL) < end)
     {
         wl_display_flush(state.display);
-
-        int timeout = 500;
-        if (animated)
-        {
-            int64_t wait = state.next_frame_ms - now_ms();
-            if (wait < 0)
-                wait = 0;
-            if (wait < timeout)
-                timeout = (int)wait;
-        }
-
         struct pollfd pfd = {wl_display_get_fd(state.display), POLLIN, 0};
-        if (poll(&pfd, 1, timeout) > 0)
-            wl_display_dispatch(state.display);
-
-        if (animated && now_ms() >= state.next_frame_ms)
+        if (poll(&pfd, 1, 500) > 0)
         {
-            state.cur_frame = (state.cur_frame + 1) % state.img.n_frames;
-            for (struct output *o = state.outputs; o; o = o->next)
-                draw_output(o);
-            state.next_frame_ms += state.img.delay_ms[state.cur_frame];
+            if (wl_display_dispatch(state.display) < 0)
+                break;
         }
     }
 
     ext_session_lock_v1_unlock_and_destroy(state.lock);
-    wl_display_roundtrip(state.display); /* make sure the request is sent */
+    wl_display_roundtrip(state.display); /* flush the unlock request */
     printf("Unlocked.\n");
 
     wl_display_disconnect(state.display);
-
-    image_free(&state.img);
-
     return 0;
 }
