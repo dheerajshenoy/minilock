@@ -21,6 +21,8 @@
 #include <unistd.h>
 #include <xkbcommon/xkbcommon.h>
 
+static struct Config CONFIG = {0};
+
 static void
 free_image(struct state *state);
 
@@ -771,7 +773,7 @@ parse_args(int argc, char **argv, struct Config *cfg)
         switch (c)
         {
             case 'i':
-                cfg->image = optarg;
+                cfg->image.path = optarg;
                 break;
             case 'c':
                 if (!parse_color(optarg, &cfg->color))
@@ -782,7 +784,7 @@ parse_args(int argc, char **argv, struct Config *cfg)
                 }
                 break;
             case 'C':
-                cfg->config_path = optarg;
+                cfg->path = optarg;
                 break;
             case 'h':
                 print_usage(stdout, argv[0]);
@@ -807,13 +809,12 @@ parse_args(int argc, char **argv, struct Config *cfg)
 int
 minilock_init(int argc, char *argv[])
 {
-    struct Config config = {0};
-    parse_args(argc, argv, &config);
+    parse_args(argc, argv, &CONFIG);
     struct state state = {0};
 
     if (argc > 1)
     {
-        if (!load_image(argv[1], &state))
+        if (!load_image(CONFIG.image.path, &state))
         {
             fprintf(stderr, "Failed to load image: %s\n", argv[1]);
             return 1;
