@@ -1,18 +1,20 @@
 #include "minilock.h"
+
 #include "config.h"
-
 #include "decoder.h"
+#include "tomlc17.h"
 
+#include <errno.h>
+#include <getopt.h>
+#include <pthread.h>
 #include <pwd.h>
 #include <security/pam_appl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <sys/mman.h>
-#include <errno.h>
-#include <pthread.h>
 #include <sys/eventfd.h>
+#include <sys/mman.h>
 #include <sys/poll.h>
 #include <sys/timerfd.h>
 #include <time.h>
@@ -30,7 +32,7 @@ load_image(const char *path, struct state *state)
         return false;
 
     unsigned char magic[12] = {0};
-    FILE *f                = fopen(path, "rb");
+    FILE *f                 = fopen(path, "rb");
     if (f)
     {
         if (fread(magic, 1, sizeof(magic), f) < sizeof(magic))
@@ -135,7 +137,7 @@ static const struct wl_buffer_listener buffer_listener = {
 static bool
 shm_buf_create(struct state *s, struct shm_buf *b, uint32_t w, uint32_t h)
 {
-    int stride = w * 4;
+    int stride  = w * 4;
     size_t size = (size_t)stride * h;
 
     int fd = memfd_create(PROJECT_NAME "-buf", 0);
@@ -244,10 +246,14 @@ dirty_add(struct output *o, int x0, int y0, int x1, int y1)
         o->dirty_y1 = y1;
         return;
     }
-    if (x0 < o->dirty_x0) o->dirty_x0 = x0;
-    if (y0 < o->dirty_y0) o->dirty_y0 = y0;
-    if (x1 > o->dirty_x1) o->dirty_x1 = x1;
-    if (y1 > o->dirty_y1) o->dirty_y1 = y1;
+    if (x0 < o->dirty_x0)
+        o->dirty_x0 = x0;
+    if (y0 < o->dirty_y0)
+        o->dirty_y0 = y0;
+    if (x1 > o->dirty_x1)
+        o->dirty_x1 = x1;
+    if (y1 > o->dirty_y1)
+        o->dirty_y1 = y1;
 }
 
 /* Output-space rectangle showing patch p. maps are monotonic, so the output
@@ -269,7 +275,10 @@ patch_bbox(const struct output *o, const struct frame_patch *p, int *bx0,
     int y1 = y0;
     while (y1 < (int)o->height && (int)o->ymap[y1] < p->top + p->h)
         y1++;
-    *bx0 = x0; *by0 = y0; *bx1 = x1; *by1 = y1;
+    *bx0 = x0;
+    *by0 = y0;
+    *bx1 = x1;
+    *by1 = y1;
     return x1 > x0 && y1 > y0;
 }
 
@@ -381,8 +390,8 @@ anim_setup(struct output *o)
     for (int k = 0; k <= img->current_frame; k++)
         anim_step(o, k);
     o->dirty_x0 = o->dirty_y0 = 0;
-    o->dirty_x1 = o->width;
-    o->dirty_y1 = o->height;
+    o->dirty_x1               = o->width;
+    o->dirty_y1               = o->height;
 }
 
 /* Render into a free buffer and commit it, damaging only what changed. */
@@ -412,10 +421,10 @@ render_output(struct output *o)
         /* The buffer may be a frame behind, so copy the whole canvas; only
          * the damage hint is limited to the changed rectangle. */
         memcpy(b->px, o->canvas, b->size);
-        dx = o->dirty_x0;
-        dy = o->dirty_y0;
-        dw = o->dirty_x1 - o->dirty_x0;
-        dh = o->dirty_y1 - o->dirty_y0;
+        dx          = o->dirty_x0;
+        dy          = o->dirty_y0;
+        dw          = o->dirty_x1 - o->dirty_x0;
+        dh          = o->dirty_y1 - o->dirty_y0;
         o->dirty_x0 = o->dirty_y0 = o->dirty_x1 = o->dirty_y1 = 0;
     }
     else
@@ -447,8 +456,8 @@ surface_configure(void *data, struct ext_session_lock_surface_v1 *ls,
     else if (o->canvas)
     {
         o->dirty_x0 = o->dirty_y0 = 0;
-        o->dirty_x1 = w;
-        o->dirty_y1 = h;
+        o->dirty_x1               = w;
+        o->dirty_y1               = h;
     }
     render_output(o);
 }
@@ -697,9 +706,109 @@ arm_timer(int fd, float ms)
     timerfd_settime(fd, 0, &its, NULL);
 }
 
+static void
+toml_error(const char *msg, const char *msg1)
+{
+    fprintf(stderr, "ERROR: %s%s\n", msg, msg1 ? msg1 : "");
+    exit(1);
+}
+
+// ---------------- config ----------------
+static bool
+parse_config(const char *path)
+{
+    toml_result_t result = toml_parse_file_ex(path);
+    if (!result.ok)
+    {
+        fprintf(stderr, "Failed to parse config.toml: %s\n", result.errmsg);
+        return false;
+    }
+
+    return true;
+}
+
+static void
+print_usage(FILE *out, const char *progname)
+{
+    fprintf(out,
+            "Usage: %s [options] [image]\n"
+            "Options:\n"
+            "  -h, --help       Show this help message and exit\n"
+            "  -c, --config     Specify a custom config file (default: "
+            "config.toml)\n"
+            "  -v, --version    Show version information and exit\n",
+            progname);
+}
+
+static bool
+parse_color(const char *s, uint32_t *out)
+{
+    if (*s == '#')
+        s++;
+    char *end;
+    unsigned long v = strtoul(s, &end, 16);
+    if (end == s || *end != '\0' || strlen(s) != 6)
+        return false;
+    *out = 0xFF000000 | (uint32_t)v;
+    return true;
+}
+
+static void
+parse_args(int argc, char **argv, struct Config *cfg)
+{
+    static const struct option longopts[] = {
+        {"image", required_argument, NULL, 'i'},
+        {"color", required_argument, NULL, 'c'},
+        {"config", required_argument, NULL, 'C'},
+        {"help", no_argument, NULL, 'h'},
+        {"version", no_argument, NULL, 'v'},
+        {0, 0, 0, 0},
+    };
+
+    int c;
+    while ((c = getopt_long(argc, argv, "i:c:C:hv", longopts, NULL)) != -1)
+    {
+        switch (c)
+        {
+            case 'i':
+                cfg->image = optarg;
+                break;
+            case 'c':
+                if (!parse_color(optarg, &cfg->color))
+                {
+                    fprintf(stderr, "Invalid color: %s (expected rrggbb)\n",
+                            optarg);
+                    exit(1);
+                }
+                break;
+            case 'C':
+                cfg->config_path = optarg;
+                break;
+            case 'h':
+                print_usage(stdout, argv[0]);
+                exit(0);
+            case 'v':
+                printf("minilock " PROJECT_VERSION "\n");
+                exit(0);
+            default: /* '?' : getopt already printed the error */
+                print_usage(stderr, argv[0]);
+                exit(1);
+        }
+    }
+
+    if (optind < argc)
+    {
+        fprintf(stderr, "Unexpected argument: %s\n", argv[optind]);
+        print_usage(stderr, argv[0]);
+        exit(1);
+    }
+}
+
 int
 minilock_init(int argc, char *argv[])
 {
+    struct Config config = {0};
+    parse_args(argc, argv, &config);
     struct state state = {0};
 
     if (argc > 1)
