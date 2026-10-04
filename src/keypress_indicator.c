@@ -36,71 +36,167 @@ state_text(const struct KeypressIndicatorConfig *c,
 }
 
 static void
-set_font(cairo_t *cr, const struct KeypressIndicatorConfig *c)
+set_font(cairo_t *cr, const struct KeypressIndicatorConfig *c, double size)
 {
     cairo_select_font_face(cr, c->text_font ? c->text_font : "sans-serif",
                            CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
-    cairo_set_font_size(cr, c->font_size);
+    cairo_set_font_size(cr, size);
 }
 
-/* Half-sizes of the shape. Without text it follows `radius`. With text it
- * ignores `radius` and fits the longest of the four texts, so the shape keeps
- * one steady size as the state changes. A circle encloses the text box, a
- * square becomes a rectangle around it. */
-static void
-shape_half_size(const struct KeypressIndicatorConfig *c, double *hw, double *hh)
+/* The widest text and the line height at the configured font size, over all
+ * four states. Measured once per indicator (the config is constant after
+ * startup); the two indicators have different fonts, so each gets its own. */
+struct measure
 {
-    if (!c->state_text)
+    const struct KeypressIndicatorConfig *config;
+    double text_w, text_h;
+};
+
+static const struct measure *
+measure_for(const struct KeypressIndicatorConfig *c)
+{
+    static struct measure cache[4];
+    struct measure *m = NULL;
+    for (size_t i = 0; i < sizeof(cache) / sizeof(*cache); i++)
     {
-        *hw = *hh = c->radius;
-        return;
+        if (cache[i].config == c)
+            return &cache[i];
+        if (!m && !cache[i].config)
+            m = &cache[i];
     }
+    if (!m)
+        m = &cache[0]; /* more indicators than slots: reuse one */
 
-    /* Measuring needs a context; a 1x1 scratch surface will do. Config never
-     * changes after startup, so measure once. */
-    static bool measured;
-    static double text_w, text_h;
-    if (!measured)
+    /* Measuring needs a context; a 1x1 scratch surface will do. */
+    cairo_surface_t *s = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
+    cairo_t *cr        = cairo_create(s);
+    set_font(cr, c, c->font_size);
+
+    m->config = c;
+    m->text_w = 0;
+    cairo_font_extents_t fe;
+    cairo_font_extents(cr, &fe);
+    m->text_h = fe.ascent + fe.descent;
+    for (int st = 0; st < 4; st++)
     {
-        cairo_surface_t *s = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
-        cairo_t *cr        = cairo_create(s);
-        set_font(cr, c);
-
-        cairo_font_extents_t fe;
-        cairo_font_extents(cr, &fe);
-        text_h = fe.ascent + fe.descent;
-
-        for (int st = 0; st < 4; st++)
-        {
-            cairo_text_extents_t te;
-            cairo_text_extents(cr, state_text(c, (enum KeypressIndicatorState)st),
-                               &te);
-            if (te.x_advance > text_w)
-                text_w = te.x_advance;
-        }
-        cairo_destroy(cr);
-        cairo_surface_destroy(s);
-        measured = true;
+        cairo_text_extents_t te;
+        cairo_text_extents(cr, state_text(c, (enum KeypressIndicatorState)st),
+                           &te);
+        if (te.x_advance > m->text_w)
+            m->text_w = te.x_advance;
     }
+    cairo_destroy(cr);
+    cairo_surface_destroy(s);
+    return m;
+}
 
-    if (c->shape == SHAPE_NONE)
+static double
+text_padding(const struct KeypressIndicatorConfig *c)
+{
+    return c->padding > 0 ? c->padding : c->font_size * 0.6;
+}
+
+/* How much to shrink the text so its box fits inside the shape (never > 1).
+ * Corner-cut shapes leave less room, hence the smaller factors. */
+static double
+text_fit_factor(const struct KeypressIndicatorConfig *c, double hw, double hh)
+{
+    const struct measure *m = measure_for(c);
+    if (m->text_w <= 0 || m->text_h <= 0 || hw <= 0 || hh <= 0)
+        return 1;
+
+    double tw = m->text_w / 2, th = m->text_h / 2, f;
+    switch (c->shape)
+    {
+        case SHAPE_CIRCLE:
+            f = 0.9 * hw / hypot(tw, th);
+            break;
+        case SHAPE_ELLIPSE:
+            f = 0.9 / hypot(tw / hw, th / hh);
+            break;
+        case SHAPE_DIAMOND:
+            f = 0.9 / (tw / hw + th / hh);
+            break;
+        case SHAPE_ROUNDED:
+        case SHAPE_PILL:
+            f = 0.8 * fmin(hw / tw, hh / th);
+            break;
+        default:
+            f = 0.9 * fmin(hw / tw, hh / th);
+            break;
+    }
+    return f < 1 ? f : 1;
+}
+
+/* Half-sizes of the shape. Without text they follow width/height, else
+ * `radius`. With text the shape fits the longest of the four texts (so it
+ * keeps one steady size as the state changes) unless width/height/radius fix
+ * the size. `*fit` says whether the text may need shrinking to fit. */
+static void
+shape_half_size(const struct KeypressIndicatorConfig *c, double *hw, double *hh,
+                bool *fit)
+{
+    *fit = false;
+
+    if (c->shape == SHAPE_NONE && c->state_text)
     {
         /* Just the text box, plus a little room for glyph overshoot. */
-        *hw = text_w / 2 + c->font_size * 0.25;
-        *hh = text_h / 2 + c->font_size * 0.25;
+        const struct measure *m = measure_for(c);
+        *hw = m->text_w / 2 + c->font_size * 0.25;
+        *hh = m->text_h / 2 + c->font_size * 0.25;
         return;
     }
 
-    double pad = c->font_size * 0.6;
-    if (c->shape == SHAPE_CIRCLE)
+    bool fixed = !c->state_text || c->fixed_size;
+    double aw = 0, ah = 0; /* automatic (text-fitting) half-sizes */
+    if (!fixed)
     {
-        *hw = *hh = hypot(text_w / 2, text_h / 2) + pad;
+        const struct measure *m = measure_for(c);
+        double pad = text_padding(c), tw = m->text_w / 2 + pad,
+               th = m->text_h / 2 + pad;
+        switch (c->shape)
+        {
+            case SHAPE_CIRCLE:
+                aw = ah = hypot(m->text_w / 2, m->text_h / 2) + pad;
+                break;
+            case SHAPE_ELLIPSE: /* encloses the text box */
+                aw = tw * M_SQRT2;
+                ah = th * M_SQRT2;
+                break;
+            case SHAPE_DIAMOND:
+                aw = tw * 2;
+                ah = th * 2;
+                break;
+            default:
+                aw = tw;
+                ah = th;
+                break;
+        }
     }
-    else
+
+    double dw = fixed ? c->radius : aw, dh = fixed ? c->radius : ah;
+    /* Wide shapes default to 2:1 when only `radius` sizes them. */
+    if (fixed && (c->shape == SHAPE_RECTANGLE || c->shape == SHAPE_PILL
+                  || c->shape == SHAPE_ELLIPSE))
+        dw = 2.0 * c->radius;
+    if (c->width > 0)
+        dw = c->width / 2.0;
+    if (c->height > 0)
+        dh = c->height / 2.0;
+
+    switch (c->shape)
     {
-        *hw = text_w / 2 + pad;
-        *hh = text_h / 2 + pad;
+        case SHAPE_CIRCLE: /* width/height don't apply to a circle */
+            dw = dh = fixed ? c->radius : aw;
+            break;
+        default:
+            break;
     }
+
+    *hw  = dw;
+    *hh  = dh;
+    /* Text may overflow when anything but the text decided the size. */
+    *fit = c->state_text && (fixed || c->width > 0 || c->height > 0);
 }
 
 /* Gap kept between the indicator and the edge for top/bottom/left/right. */
@@ -149,7 +245,8 @@ keypress_indicator_bounds(int width, int height,
                           int *y, int *w, int *h)
 {
     double hw, hh;
-    shape_half_size(config, &hw, &hh);
+    bool fit;
+    shape_half_size(config, &hw, &hh, &fit);
 
     double cx, cy;
     indicator_center(width, height, config, hw, hh, &cx, &cy);
@@ -186,6 +283,59 @@ contrast_color(uint32_t fill)
            b = (fill & 0xFF) / 255.0;
     double luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
     return luma > 0.6 ? 0xFF000000u : 0xFFFFFFFFu;
+}
+
+/* Rounded rectangle path with corner radius r (already limited to fit). */
+static void
+rounded_rect(cairo_t *cr, double x, double y, double w, double h, double r)
+{
+    cairo_new_sub_path(cr);
+    cairo_arc(cr, x + w - r, y + r, r, -M_PI / 2, 0);
+    cairo_arc(cr, x + w - r, y + h - r, r, 0, M_PI / 2);
+    cairo_arc(cr, x + r, y + h - r, r, M_PI / 2, M_PI);
+    cairo_arc(cr, x + r, y + r, r, M_PI, 3 * M_PI / 2);
+    cairo_close_path(cr);
+}
+
+/* Adds the shape's outline, centered on (cx, cy) with half-sizes hw x hh. */
+static void
+shape_path(cairo_t *cr, const struct KeypressIndicatorConfig *c, double cx,
+           double cy, double hw, double hh)
+{
+    switch (c->shape)
+    {
+        case SHAPE_CIRCLE:
+            cairo_arc(cr, cx, cy, hw, 0, 2 * M_PI);
+            break;
+        case SHAPE_ROUNDED:
+        case SHAPE_PILL:
+        {
+            double shorter = fmin(hw, hh);
+            double r       = c->shape == SHAPE_PILL ? shorter
+                             : c->corner_radius > 0 ? fmin(c->corner_radius, shorter)
+                                                    : shorter * 0.5;
+            rounded_rect(cr, cx - hw, cy - hh, 2 * hw, 2 * hh, r);
+            break;
+        }
+        case SHAPE_ELLIPSE:
+            cairo_save(cr);
+            cairo_translate(cr, cx, cy);
+            cairo_scale(cr, hw, hh);
+            cairo_arc(cr, 0, 0, 1, 0, 2 * M_PI);
+            cairo_restore(cr); /* the path keeps its shape */
+            break;
+        case SHAPE_DIAMOND:
+            cairo_move_to(cr, cx - hw, cy);
+            cairo_line_to(cr, cx, cy - hh);
+            cairo_line_to(cr, cx + hw, cy);
+            cairo_line_to(cr, cx, cy + hh);
+            cairo_close_path(cr);
+            break;
+        case SHAPE_RECTANGLE:
+        default:
+            cairo_rectangle(cr, cx - hw, cy - hh, 2 * hw, 2 * hh);
+            break;
+    }
 }
 
 /* The text color for a state. An explicit per-state color wins, then the
@@ -251,18 +401,32 @@ render_keypress_indicator(cairo_surface_t *cairo_surface, int width, int height,
     cairo_clip(cr);
 
     double hw, hh;
-    shape_half_size(config, &hw, &hh);
+    bool fit;
+    shape_half_size(config, &hw, &hh, &fit);
     double cx, cy;
     indicator_center(width, height, config, hw, hh, &cx, &cy);
 
     if (config->shape != SHAPE_NONE)
     {
+        shape_path(cr, config, cx, cy, hw, hh);
         set_color(cr, color);
-        if (config->shape == SHAPE_CIRCLE)
-            cairo_arc(cr, cx, cy, hw, 0, 2 * M_PI);
+        if (config->border_width > 0)
+        {
+            cairo_fill_preserve(cr);
+
+            /* Clip to the shape and stroke twice the width, so the border
+             * is drawn inside the edge and the size doesn't change. */
+            cairo_save(cr);
+            cairo_clip_preserve(cr);
+            set_color(cr, config->border_color ? config->border_color
+                                               : contrast_color(color));
+            cairo_set_line_width(cr, 2.0 * config->border_width);
+            cairo_stroke(cr);
+            cairo_restore(cr);
+        }
         else
-            cairo_rectangle(cr, cx - hw, cy - hh, 2 * hw, 2 * hh);
-        cairo_fill(cr);
+            cairo_fill(cr);
+        cairo_new_path(cr);
     }
 
     if (config->state_text)
@@ -270,7 +434,10 @@ render_keypress_indicator(cairo_surface_t *cairo_surface, int width, int height,
         const char *text = state_text(config, state);
         if (*text)
         {
-            set_font(cr, config);
+            double font_px = config->font_size;
+            if (fit && config->shape != SHAPE_NONE)
+                font_px *= text_fit_factor(config, hw, hh);
+            set_font(cr, config, font_px);
             cairo_font_extents_t fe;
             cairo_font_extents(cr, &fe);
             cairo_text_extents_t te;

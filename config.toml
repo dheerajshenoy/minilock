@@ -23,10 +23,10 @@ type = "kawase" # "box" or "gaussian" or "kawase" or "stack"
 # "center", "top", "bottom", "left", "right", "top-left", "top-right",
 # "bottom-left", "bottom-right", or "x:100,y:-40" (pixels; negative = from the
 # far edge) / "x:25%,y:80%"; either axis may be left out
-location = "center"
+location = "bottom-left"
 show = true
 color = "#FF5000"
-shape = "none"
+shape = "circle"
 radius = 40
 font = "Berkeley Mono"
 state_text = false
@@ -36,3 +36,4 @@ show = true
 location = "top-right"
 color = "#FF5000"
 shape = "circle"
+radius = 10

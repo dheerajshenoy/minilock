@@ -46,8 +46,7 @@ static struct Config CONFIG = {
     /* Top, centered, a small amber label that only shows while Caps Lock is
      * on. */
     .capslock_indicator = {.location   = {.x = {POS_CENTER}, .y = {POS_START}},
-                           .shape      = SHAPE_SQUARE,
-                           .radius     = 14,
+                           .shape      = SHAPE_RECTANGLE,
                            .state_text = true,
                            .text_font  = "sans-serif",
                            .font_size  = 16,
@@ -562,9 +561,11 @@ render_output(struct output *o)
 
     if (CONFIG.keypress_indicator.show)
     {
-        render_keypress_indicator(b->cairo_surface, o->width, o->height,
-                                  &CONFIG.keypress_indicator,
-                                  o->state->keypress_indicator_state);
+        enum KeypressIndicatorState ks = o->state->keypress_indicator_state;
+        if (!(CONFIG.keypress_indicator.hide_idle
+              && ks == KEYPRESS_INDICATOR_STATE_IDLE))
+            render_keypress_indicator(b->cairo_surface, o->width, o->height,
+                                      &CONFIG.keypress_indicator, ks);
 
         int ix, iy, iw, ih;
         keypress_indicator_bounds(o->width, o->height,
@@ -1066,7 +1067,7 @@ parse_config(void)
         K_TINT,  /* "#RRGGBBAA" only -> uint32_t 0xAARRGGBB */
         K_BLUR,  /* "box" | "gaussian" | "kawase" | "stack" -> BlurType */
         K_POS,   /* integer >= 1 -> int */
-        K_SHAPE, /* "circle" | "square" -> KeypressIndicatorShape */
+        K_SHAPE, /* "circle" | "rectangle" | ... -> KeypressIndicatorShape */
         K_LOCATION, /* "top-left", "x:10%,y:-40", ... -> struct Location */
     };
     struct
@@ -1103,6 +1104,18 @@ parse_config(void)
          &CONFIG.capslock_indicator.text_font},
         {"indicator.capslock.font_size", K_POS,
          &CONFIG.capslock_indicator.font_size},
+        {"indicator.capslock.width", K_POS,
+         &CONFIG.capslock_indicator.width},
+        {"indicator.capslock.height", K_POS,
+         &CONFIG.capslock_indicator.height},
+        {"indicator.capslock.corner_radius", K_POS,
+         &CONFIG.capslock_indicator.corner_radius},
+        {"indicator.capslock.padding", K_POS,
+         &CONFIG.capslock_indicator.padding},
+        {"indicator.capslock.border_width", K_POS,
+         &CONFIG.capslock_indicator.border_width},
+        {"indicator.capslock.border_color", K_COLOR,
+         &CONFIG.capslock_indicator.border_color},
         {"indicator.capslock.color", K_COLOR,
          &CONFIG.capslock_indicator.color},
         {"indicator.capslock.color_on", K_COLOR,
@@ -1134,6 +1147,20 @@ parse_config(void)
         {"indicator.keypress.radius", K_POS, &CONFIG.keypress_indicator.radius},
         {"indicator.keypress.location", K_LOCATION,
          &CONFIG.keypress_indicator.location},
+        {"indicator.keypress.width", K_POS,
+         &CONFIG.keypress_indicator.width},
+        {"indicator.keypress.height", K_POS,
+         &CONFIG.keypress_indicator.height},
+        {"indicator.keypress.corner_radius", K_POS,
+         &CONFIG.keypress_indicator.corner_radius},
+        {"indicator.keypress.padding", K_POS,
+         &CONFIG.keypress_indicator.padding},
+        {"indicator.keypress.border_width", K_POS,
+         &CONFIG.keypress_indicator.border_width},
+        {"indicator.keypress.border_color", K_COLOR,
+         &CONFIG.keypress_indicator.border_color},
+        {"indicator.keypress.hide_idle", K_BOOL,
+         &CONFIG.keypress_indicator.hide_idle},
         {"indicator.keypress.hide_length", K_BOOL,
          &CONFIG.keypress_indicator.hide_length},
         {"indicator.keypress.state_text", K_BOOL,
@@ -1218,7 +1245,11 @@ parse_config(void)
                     enum KeypressIndicatorShape shape;
                 } shapes[]
                     = {{"circle", SHAPE_CIRCLE},
-                       {"square", SHAPE_SQUARE},
+                       {"rectangle", SHAPE_RECTANGLE},
+                       {"rounded", SHAPE_ROUNDED},
+                       {"pill", SHAPE_PILL},
+                       {"ellipse", SHAPE_ELLIPSE},
+                       {"diamond", SHAPE_DIAMOND},
                        {"none", SHAPE_NONE}};
 
                 bool found = false;
@@ -1230,7 +1261,8 @@ parse_config(void)
                         found = true;
                     }
                 if (!found)
-                    toml_error("Unknown shape (use circle, square or none) for key: ",
+                    toml_error("Unknown shape (circle, rectangle, rounded, pill, "
+                               "ellipse, diamond or none) for key: ",
                                entries[i].key);
                 break;
             }
@@ -1318,7 +1350,14 @@ finish_config(void)
         .show                 = c->show,
         .location             = c->location,
         .shape                = c->shape,
-        .radius               = c->radius,
+        .radius               = c->radius ? c->radius : 14,
+        .fixed_size           = c->radius > 0,
+        .width                = c->width,
+        .height               = c->height,
+        .corner_radius        = c->corner_radius,
+        .padding              = c->padding,
+        .border_width         = c->border_width,
+        .border_color         = c->border_color,
         .state_text           = c->state_text || c->shape == SHAPE_NONE,
         .text_font            = c->text_font,
         .font_size            = c->font_size,
