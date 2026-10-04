@@ -1,0 +1,6 @@
+#
+# PAM configuration for the minilock screen locker. It reuses the "login"
+# stack, like swaylock does; edit it if your system names things differently
+# (for example `@include common-auth` on Debian-based systems).
+#
+auth include login

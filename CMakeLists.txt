@@ -125,3 +125,29 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 target_link_libraries(${PROJECT_NAME} PRIVATE
   ${WAYLAND_CLIENT_LIBRARIES} ${XKBCOMMON_LIBRARIES} ${PAM_LIB} m
   Threads::Threads)
+
+# ---------------- install ----------------
+include(GNUInstallDirs)
+
+install(TARGETS ${PROJECT_NAME} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+# minilock authenticates through the PAM service named after the program, so
+# /etc/pam.d/minilock must exist. PAM only reads /etc/pam.d (not the install
+# prefix), hence the absolute default.
+option(MINILOCK_INSTALL_PAM "Install the PAM service file" ON)
+set(MINILOCK_PAM_DIR "/etc/pam.d" CACHE PATH "Where the PAM service file goes")
+
+if(MINILOCK_INSTALL_PAM)
+  # Never overwrite an existing file: it may have been edited for this system.
+  # (file(INSTALL) applies DESTDIR itself; the EXISTS check has to do it by hand.)
+  install(CODE "
+    set(dest \"\$ENV{DESTDIR}${MINILOCK_PAM_DIR}/${PROJECT_NAME}\")
+    if(EXISTS \"\${dest}\")
+      message(STATUS \"Keeping existing PAM file: \${dest}\")
+    else()
+      file(INSTALL \"${CMAKE_CURRENT_SOURCE_DIR}/pam.d/${PROJECT_NAME}\"
+           DESTINATION \"${MINILOCK_PAM_DIR}\"
+           PERMISSIONS OWNER_READ OWNER_WRITE GROUP_READ WORLD_READ)
+    endif()
+  ")
+endif()
