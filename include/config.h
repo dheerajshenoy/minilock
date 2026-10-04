@@ -104,11 +104,32 @@ struct KeypressIndicatorConfig
     int radius;
 };
 
+/* The caps lock indicator. It is drawn by the same code as the keypress
+ * indicator: finish_config() maps it onto a KeypressIndicatorConfig (off =
+ * idle, on = typing) kept in Config.capslock_view. */
+struct CapslockIndicatorConfig
+{
+    bool show;
+    bool show_when_off; /* otherwise it only appears while caps lock is on */
+    struct Location location;
+    enum KeypressIndicatorShape shape;
+    int radius; /* used when there is no text */
+    bool state_text;
+    const char *text_font;
+    int font_size;
+    uint32_t color;                /* shorthand for color_on */
+    uint32_t color_on, color_off;
+    const char *text_on, *text_off;
+    uint32_t text_color, text_color_on, text_color_off;
+};
+
 struct Config
 {
     const char *path;
     struct ImageConfig image;
     struct KeypressIndicatorConfig keypress_indicator;
+    struct CapslockIndicatorConfig capslock_indicator;
+    struct KeypressIndicatorConfig capslock_view; /* derived, see above */
     struct BehaviorConfig behavior;
     struct PAM pam;
 };

@@ -43,6 +43,18 @@ static struct Config CONFIG = {
                            .text_typing    = "Typing",
                            .text_verifying = "Verifying",
                            .text_failed    = "Wrong password"},
+    /* Top, centered, a small amber label that only shows while Caps Lock is
+     * on. */
+    .capslock_indicator = {.location   = {.x = {POS_CENTER}, .y = {POS_START}},
+                           .shape      = SHAPE_SQUARE,
+                           .radius     = 14,
+                           .state_text = true,
+                           .text_font  = "sans-serif",
+                           .font_size  = 16,
+                           /* color_on: see finish_config (default amber) */
+                           .color_off  = 0xFF555555, /* gray  */
+                           .text_on    = "Caps Lock",
+                           .text_off   = ""},
 };
 
 static void
@@ -560,6 +572,22 @@ render_output(struct output *o)
                                   &ih);
         rect_add(&dmg, ix, iy, ix + iw, iy + ih);
     }
+
+    if (CONFIG.capslock_view.show)
+    {
+        bool on = o->state->caps_lock;
+        if (on || CONFIG.capslock_indicator.show_when_off)
+            render_keypress_indicator(
+                b->cairo_surface, o->width, o->height, &CONFIG.capslock_view,
+                on ? KEYPRESS_INDICATOR_STATE_TYPING
+                   : KEYPRESS_INDICATOR_STATE_IDLE);
+
+        /* Damage the whole area it can occupy, also when it just vanished. */
+        int cx, cy, cw, ch;
+        keypress_indicator_bounds(o->width, o->height, &CONFIG.capslock_view,
+                                  &cx, &cy, &cw, &ch);
+        rect_add(&dmg, cx, cy, cx + cw, cy + ch);
+    }
     o->indicator_dirty = false;
 
     b->busy = true;
@@ -653,7 +681,18 @@ check_password(const char *pw)
 
 static void arm_timer(int fd, float ms);
 
-/* Change what the indicator shows, and redraw every output if it changed. */
+/* Redraw every output because an indicator changed. */
+static void
+indicators_redraw(struct state *s)
+{
+    for (struct output *o = s->outputs; o; o = o->next)
+    {
+        o->indicator_dirty = true;
+        render_output(o);
+    }
+}
+
+/* Change what the keypress indicator shows, and redraw if it changed. */
 static void
 indicator_set(struct state *s, enum KeypressIndicatorState st)
 {
@@ -661,13 +700,8 @@ indicator_set(struct state *s, enum KeypressIndicatorState st)
         return;
     s->keypress_indicator_state = st;
 
-    if (!CONFIG.keypress_indicator.show)
-        return;
-    for (struct output *o = s->outputs; o; o = o->next)
-    {
-        o->indicator_dirty = true;
-        render_output(o);
-    }
+    if (CONFIG.keypress_indicator.show)
+        indicators_redraw(s);
 }
 
 static void *
@@ -819,9 +853,23 @@ kb_modifiers(void *data, struct wl_keyboard *kb, uint32_t serial,
              uint32_t group)
 {
     struct state *s = data;
-    if (s->xkb_state)
-        xkb_state_update_mask(s->xkb_state, depressed, latched, locked, 0, 0,
-                              group);
+    if (!s->xkb_state)
+        return;
+
+    xkb_state_update_mask(s->xkb_state, depressed, latched, locked, 0, 0,
+                          group);
+
+    /* Caps Lock is a locked modifier. This event also arrives when the lock
+     * surface gains focus, so the indicator is right from the start. */
+    bool caps = xkb_state_mod_name_is_active(s->xkb_state, XKB_MOD_NAME_CAPS,
+                                             XKB_STATE_MODS_LOCKED)
+                > 0;
+    if (caps != s->caps_lock)
+    {
+        s->caps_lock = caps;
+        if (CONFIG.capslock_view.show)
+            indicators_redraw(s);
+    }
 }
 
 static void
@@ -1042,6 +1090,36 @@ parse_config(void)
         {"behavior.fail_delay_s", K_FLOAT, &CONFIG.behavior.fail_delay_s},
         {"behavior.daemonize", K_BOOL, &CONFIG.behavior.daemonize},
 
+        {"indicator.capslock.show", K_BOOL, &CONFIG.capslock_indicator.show},
+        {"indicator.capslock.show_when_off", K_BOOL,
+         &CONFIG.capslock_indicator.show_when_off},
+        {"indicator.capslock.location", K_LOCATION,
+         &CONFIG.capslock_indicator.location},
+        {"indicator.capslock.shape", K_SHAPE, &CONFIG.capslock_indicator.shape},
+        {"indicator.capslock.radius", K_POS, &CONFIG.capslock_indicator.radius},
+        {"indicator.capslock.state_text", K_BOOL,
+         &CONFIG.capslock_indicator.state_text},
+        {"indicator.capslock.font", K_STRING,
+         &CONFIG.capslock_indicator.text_font},
+        {"indicator.capslock.font_size", K_POS,
+         &CONFIG.capslock_indicator.font_size},
+        {"indicator.capslock.color", K_COLOR,
+         &CONFIG.capslock_indicator.color},
+        {"indicator.capslock.color_on", K_COLOR,
+         &CONFIG.capslock_indicator.color_on},
+        {"indicator.capslock.color_off", K_COLOR,
+         &CONFIG.capslock_indicator.color_off},
+        {"indicator.capslock.text_on", K_STRING,
+         &CONFIG.capslock_indicator.text_on},
+        {"indicator.capslock.text_off", K_STRING,
+         &CONFIG.capslock_indicator.text_off},
+        {"indicator.capslock.text_color", K_COLOR,
+         &CONFIG.capslock_indicator.text_color},
+        {"indicator.capslock.text_color_on", K_COLOR,
+         &CONFIG.capslock_indicator.text_color_on},
+        {"indicator.capslock.text_color_off", K_COLOR,
+         &CONFIG.capslock_indicator.text_color_off},
+
         {"indicator.keypress.show", K_BOOL, &CONFIG.keypress_indicator.show},
         {"indicator.keypress.color", K_COLOR, &CONFIG.keypress_indicator.color},
         {"indicator.keypress.color_idle", K_COLOR,
@@ -1229,6 +1307,35 @@ finish_config(void)
         if (ki->color && !ki->text_color)
             ki->text_color = ki->color;
     }
+
+    /* The caps lock indicator is drawn by the keypress indicator's code, so
+     * describe it in that vocabulary: off is "idle", on is "typing" (the other
+     * two states are never used). */
+    struct CapslockIndicatorConfig *c = &CONFIG.capslock_indicator;
+    if (!c->color_on)
+        c->color_on = c->color ? c->color : 0xFFFFB300; /* amber */
+    CONFIG.capslock_view = (struct KeypressIndicatorConfig){
+        .show                 = c->show,
+        .location             = c->location,
+        .shape                = c->shape,
+        .radius               = c->radius,
+        .state_text           = c->state_text || c->shape == SHAPE_NONE,
+        .text_font            = c->text_font,
+        .font_size            = c->font_size,
+        .color_idle           = c->color_off,
+        .color_typing         = c->color_on,
+        .color_verifying      = c->color_on,
+        .color_failed         = c->color_on,
+        .text_idle            = c->text_off,
+        .text_typing          = c->text_on,
+        .text_verifying       = c->text_on,
+        .text_failed          = c->text_on,
+        .text_color           = c->text_color,
+        .text_color_idle      = c->text_color_off,
+        .text_color_typing    = c->text_color_on,
+        .text_color_verifying = c->text_color_on,
+        .text_color_failed    = c->text_color_on,
+    };
 }
 
 static void
