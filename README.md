@@ -33,7 +33,6 @@ Wayland screen locking utility with wide image support (including animated ones)
    sudo make install
    ```
 
-<!-- # Add a note -->
 > [!NOTE]
 > Image format dependencies are loaded at runtime, so you can install them later if you want support for more image formats.
 
