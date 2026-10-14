@@ -92,6 +92,7 @@ struct KeypressIndicatorConfig
      * longest of the four texts and `radius` is ignored. */
     bool state_text;
     const char *text_font; /* family name, e.g. "sans-serif" */
+    bool bold, italic;     /* font style */
     int font_size;         /* pixels */
     /* Text color per state. Unset: text_color, else (with a shape) black or
      * white, whichever contrasts, or (text only) the state's own color. */
@@ -136,6 +137,7 @@ struct CapslockIndicatorConfig
     bool state_text;
     const char *text_font;
     int font_size;
+    bool bold, italic;
     uint32_t color;                /* shorthand for color_on */
     uint32_t color_on, color_off;
     const char *text_on, *text_off;
@@ -153,6 +155,8 @@ struct Config
      * from the breach_attempts-th wrong password on, until unlocked. */
     struct KeypressIndicatorConfig breach_indicator;
     int breach_attempts;
+    bool breach_blink;
+    int breach_blink_ms; /* time on, and time off */
     struct BehaviorConfig behavior;
     struct PAM pam;
 };

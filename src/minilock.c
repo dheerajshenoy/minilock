@@ -63,6 +63,7 @@ static struct Config CONFIG = {
                          .color_failed = 0xFFFF453A, /* red */
                          .text_failed  = "Failed unlock attempts detected"},
     .breach_attempts  = 3,
+    .breach_blink_ms  = 500,
 };
 
 static void
@@ -600,7 +601,8 @@ render_output(struct output *o)
     }
     if (CONFIG.breach_indicator.show)
     {
-        if (o->state->failed_attempts >= CONFIG.breach_attempts)
+        if (o->state->failed_attempts >= CONFIG.breach_attempts
+            && (!CONFIG.breach_blink || o->state->breach_lit))
             render_keypress_indicator(b->cairo_surface, o->width, o->height,
                                       &CONFIG.breach_indicator,
                                       KEYPRESS_INDICATOR_STATE_FAILED);
@@ -1089,6 +1091,7 @@ parse_config(void)
         K_BLUR,  /* "box" | "gaussian" | "kawase" | "stack" -> BlurType */
         K_POS,   /* integer >= 1 -> int */
         K_SHAPE, /* "circle" | "rectangle" | ... -> KeypressIndicatorShape */
+        K_STYLE,    /* "bold", "italic", "bold italic", "normal" -> bold+italic */
         K_LOCATION, /* "top-left", "x:10%,y:-40", ... -> struct Location */
     };
     struct
@@ -1156,6 +1159,8 @@ parse_config(void)
 
         {"indicator.breach.show", K_BOOL, &CONFIG.breach_indicator.show},
         {"indicator.breach.attempts", K_POS, &CONFIG.breach_attempts},
+        {"indicator.breach.blink", K_BOOL, &CONFIG.breach_blink},
+        {"indicator.breach.blink_ms", K_POS, &CONFIG.breach_blink_ms},
         {"indicator.breach.location", K_LOCATION,
          &CONFIG.breach_indicator.location},
         {"indicator.breach.shape", K_SHAPE, &CONFIG.breach_indicator.shape},
@@ -1169,15 +1174,22 @@ parse_config(void)
          &CONFIG.breach_indicator.border_width},
         {"indicator.breach.border_color", K_COLOR,
          &CONFIG.breach_indicator.border_color},
-        {"indicator.breach.color", K_COLOR,
+        {"indicator.breach.bgcolor", K_COLOR,
          &CONFIG.breach_indicator.color_failed},
+        {"indicator.breach.color", K_COLOR,
+         &CONFIG.breach_indicator.text_color},
         {"indicator.breach.font", K_STRING, &CONFIG.breach_indicator.text_font},
         {"indicator.breach.font_size", K_POS,
          &CONFIG.breach_indicator.font_size},
+        {"indicator.breach.style", K_STYLE, &CONFIG.breach_indicator.bold},
+        {"indicator.keypress.style", K_STYLE,
+         &CONFIG.keypress_indicator.bold},
+        {"indicator.capslock.style", K_STYLE,
+         &CONFIG.capslock_indicator.bold},
+        {"indicator.breach.text_size", K_POS,
+         &CONFIG.breach_indicator.font_size},
         {"indicator.breach.text", K_STRING,
          &CONFIG.breach_indicator.text_failed},
-        {"indicator.breach.text_color", K_COLOR,
-         &CONFIG.breach_indicator.text_color},
         {"indicator.keypress.show", K_BOOL, &CONFIG.keypress_indicator.show},
         {"indicator.keypress.color", K_COLOR, &CONFIG.keypress_indicator.color},
         {"indicator.keypress.color_idle", K_COLOR,
@@ -1270,6 +1282,26 @@ parse_config(void)
                     toml_error("Must be between 1 and 1000: ", entries[i].key);
                 *(int *)entries[i].dest = (int)datum.u.int64;
                 break;
+            case K_STYLE:
+            {
+                bool *flags = entries[i].dest; /* bold, then italic */
+                char buf[64];
+                snprintf(buf, sizeof(buf), "%s", datum.u.s);
+                flags[0] = flags[1] = false;
+                for (char *save, *t = strtok_r(buf, " ,+-", &save); t;
+                     t = strtok_r(NULL, " ,+-", &save))
+                {
+                    if (!strcmp(t, "bold"))
+                        flags[0] = true;
+                    else if (!strcmp(t, "italic") || !strcmp(t, "oblique"))
+                        flags[1] = true;
+                    else if (strcmp(t, "normal") && strcmp(t, "regular"))
+                        toml_error("Unknown font style (use normal, bold, "
+                                   "italic): ",
+                                   entries[i].key);
+                }
+                break;
+            }
             case K_LOCATION:
             {
                 const char *err = keypress_location_parse(
@@ -1416,6 +1448,8 @@ finish_config(void)
         .state_text           = c->state_text || c->shape == SHAPE_NONE,
         .text_font            = c->text_font,
         .font_size            = c->font_size,
+        .bold                 = c->bold,
+        .italic               = c->italic,
         .color_idle           = c->color_off,
         .color_typing         = c->color_on,
         .color_verifying      = c->color_on,
@@ -1526,6 +1560,7 @@ minilock_init(int argc, char *argv[])
     finish_config();
     struct state state = {0};
     state.indicator_tfd = -1; /* 0 would be stdin */
+    state.breach_tfd    = -1;
 
     /* If there's no image, or it fails to load, the background color is used
      * (still locking beats refusing to start). */
@@ -1638,6 +1673,10 @@ minilock_init(int argc, char *argv[])
     state.indicator_tfd
         = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
 
+    /* Periodic timer for the breach label's blinking, armed on breach. */
+    state.breach_tfd
+        = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
+
     /* Frame timer, only for animated images. */
     struct image *img = state.img;
     int tfd           = -1;
@@ -1658,13 +1697,14 @@ minilock_init(int argc, char *argv[])
             break;
         }
 
-        struct pollfd pfds[4] = {
+        struct pollfd pfds[5] = {
             {wl_display_get_fd(state.display), POLLIN, 0},
             {tfd, POLLIN, 0}, /* a negative fd is ignored by poll */
             {state.auth_efd, POLLIN, 0},
             {state.indicator_tfd, POLLIN, 0},
+            {state.breach_tfd, POLLIN, 0},
         };
-        if (poll(pfds, 4, 500) <= 0)
+        if (poll(pfds, 5, 500) <= 0)
         {
             wl_display_cancel_read(state.display);
             continue;
@@ -1694,11 +1734,37 @@ minilock_init(int argc, char *argv[])
                     state.failed_attempts++;
                     if (CONFIG.breach_indicator.show
                         && state.failed_attempts == CONFIG.breach_attempts)
+                    {
+                        state.breach_lit = true;
+                        if (CONFIG.breach_blink && state.breach_tfd >= 0)
+                        {
+                            float ms = (float)CONFIG.breach_blink_ms;
+                            struct itimerspec its = {
+                                .it_interval = {ms / 1000,
+                                                (long)((int)ms % 1000)
+                                                    * 1000000L},
+                                .it_value    = {ms / 1000,
+                                                (long)((int)ms % 1000)
+                                                    * 1000000L},
+                            };
+                            timerfd_settime(state.breach_tfd, 0, &its, NULL);
+                        }
                         indicators_redraw(&state);
+                    }
                     indicator_set(&state, KEYPRESS_INDICATOR_STATE_FAILED);
                     if (state.indicator_tfd >= 0)
                         arm_timer(state.indicator_tfd, FAILED_FLASH_MS);
                 }
+            }
+        }
+
+        if (state.breach_tfd >= 0 && (pfds[4].revents & POLLIN))
+        {
+            uint64_t n;
+            if (read(state.breach_tfd, &n, sizeof(n)) > 0 && (n % 2))
+            {
+                state.breach_lit = !state.breach_lit;
+                indicators_redraw(&state);
             }
         }
 
@@ -1736,6 +1802,8 @@ minilock_init(int argc, char *argv[])
         close(tfd);
     if (state.indicator_tfd >= 0)
         close(state.indicator_tfd);
+    if (state.breach_tfd >= 0)
+        close(state.breach_tfd);
     close(state.auth_efd);
     free(state.src_canvas);
     free(state.src_prev);

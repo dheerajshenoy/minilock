@@ -39,7 +39,10 @@ static void
 set_font(cairo_t *cr, const struct KeypressIndicatorConfig *c, double size)
 {
     cairo_select_font_face(cr, c->text_font ? c->text_font : "sans-serif",
-                           CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+                           c->italic ? CAIRO_FONT_SLANT_ITALIC
+                                     : CAIRO_FONT_SLANT_NORMAL,
+                           c->bold ? CAIRO_FONT_WEIGHT_BOLD
+                                   : CAIRO_FONT_WEIGHT_NORMAL);
     cairo_set_font_size(cr, size);
 }
 

@@ -85,6 +85,8 @@ hide_length = false
 state_text = false
 font = "sans-serif"
 font_size = 16
+# "normal", "bold", "italic" or "bold italic".
+style = "normal"
 text_idle = "Locked"
 text_typing = "Typing"
 text_verifying = "Verifying"
@@ -124,6 +126,8 @@ color_off = "#555555"
 state_text = true
 font = "sans-serif"
 font_size = 16
+# "normal", "bold", "italic" or "bold italic".
+style = "normal"
 text_on = "Caps Lock"
 text_off = ""
 # text_color = "#000000"
@@ -140,6 +144,9 @@ text_off = ""
 show = false
 # Wrong passwords before the warning appears.
 attempts = 3
+# Blink the label: shown for blink_ms, hidden for blink_ms (1-1000).
+blink = false
+blink_ms = 500
 location = "bottom"
 shape = "rectangle"
 # 0 = size the shape to the text; else a fixed size, and the text shrinks to
@@ -151,8 +158,12 @@ shape = "rectangle"
 # padding = 10
 # border_width = 2
 # border_color = "#FFFFFF"
-color = "#FF453A"
+# Fill of the label, and the color of its text (unset: black or white,
+# whichever contrasts with the fill).
+bgcolor = "#FF453A"
+# color = "#FFFFFF"
 text = "Failed unlock attempts detected"
 font = "sans-serif"
-font_size = 16
-# text_color = "#FFFFFF"
+font_size = 16 # text_size is accepted as an alias
+# "normal", "bold", "italic" or "bold italic".
+style = "normal"
