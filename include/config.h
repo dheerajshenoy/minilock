@@ -149,6 +149,10 @@ struct Config
     struct KeypressIndicatorConfig keypress_indicator;
     struct CapslockIndicatorConfig capslock_indicator;
     struct KeypressIndicatorConfig capslock_view; /* derived, see above */
+    /* Breach warning: drawn (as the "failed" state of a keypress indicator)
+     * from the breach_attempts-th wrong password on, until unlocked. */
+    struct KeypressIndicatorConfig breach_indicator;
+    int breach_attempts;
     struct BehaviorConfig behavior;
     struct PAM pam;
 };

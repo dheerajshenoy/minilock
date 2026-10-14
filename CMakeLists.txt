@@ -131,6 +131,10 @@ include(GNUInstallDirs)
 
 install(TARGETS ${PROJECT_NAME} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
+# A documented copy of every setting, to start a config from.
+install(FILES default_config.toml
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/${PROJECT_NAME})
+
 # minilock authenticates through the PAM service named after the program, so
 # /etc/pam.d/minilock must exist. PAM only reads /etc/pam.d (not the install
 # prefix), hence the absolute default.

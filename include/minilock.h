@@ -82,6 +82,7 @@ struct state
     /* PAM runs on a worker thread so a failed attempt's delay (pam_faildelay,
      * usually ~2s) doesn't freeze the event loop and the animation. */
     bool caps_lock; /* the Caps Lock modifier is locked on */
+    int failed_attempts; /* wrong passwords since locking */
     bool auth_pending;
     char auth_pw[256];
     atomic_int auth_result; /* 0 running, 1 ok, 2 wrong */

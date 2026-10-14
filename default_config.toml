@@ -1,0 +1,158 @@
+# minilock default configuration.
+#
+# Every key below is shown with the value minilock uses when the key is left
+# out, so this file can be copied as a starting point:
+#
+#   mkdir -p ~/.config/minilock
+#   cp default_config.toml ~/.config/minilock/config.toml
+#
+# minilock reads $XDG_CONFIG_HOME/minilock/config.toml, or
+# ~/.config/minilock/config.toml, unless you pass -c/--config <file>.
+#
+# Keys that have no default (they are off or unset until you give them a
+# value) are commented out. Colors are "#RRGGBB" or "#RRGGBBAA"; sizes are in
+# pixels.
+
+[behavior]
+# Pressing Enter on an empty password field does nothing.
+ignore_empty_password = true
+# Seconds to wait after a wrong password before accepting another attempt.
+fail_delay_s = 2.0
+# Fork into the background once the screen is locked.
+daemonize = true
+
+
+[image]
+# Shown when there is no image, or it fails to load.
+bgcolor = "#FF5000"
+# JPEG, PNG, GIF, WebP, AVIF, HEIC, TIFF, BMP or SVG. Animated GIF, WebP and
+# AVIF play. "~/" is expanded.
+# path = "~/Pictures/wallpaper.png"
+# Bilinear scaling instead of nearest-neighbour.
+smooth = false
+# Keep the processed image (decoded, tinted, blurred) in
+# $XDG_CACHE_HOME/minilock so the next start is quick.
+cache = true
+# Blend a color over the image: "#RRGGBBAA", the alpha is the strength
+# (00 = none, FF = solid).
+# tint = "#00000080"
+
+[image.blur]
+enable = false
+# Size of the blur in image pixels (1-1000), and how many times it is applied.
+radius = 10
+iterations = 1
+# "box", "gaussian", "stack" or "kawase".
+type = "box"
+
+
+# ---------------------------------------------------------------------------
+# The keypress indicator: shows idle / typing / verifying / failed.
+# ---------------------------------------------------------------------------
+[indicator.keypress]
+show = false
+# "center", "top", "bottom", "left", "right", "top-left", "top-right",
+# "bottom-left", "bottom-right", or explicit: "x:100,y:-40" (pixels to the
+# indicator's center; negative counts from the right/bottom edge) or
+# "x:25%,y:80%". Either axis may be left out.
+location = "center"
+# "circle", "rectangle", "rounded", "pill", "ellipse", "diamond" or "none"
+# (text only). A square is a rectangle with equal width and height.
+shape = "circle"
+# Size without text (or with a fixed size). 1-1000.
+radius = 10
+# Shape geometry; 0/unset = automatic (fit the text, or follow radius).
+# width = 120
+# height = 48
+# corner_radius = 12      # for "rounded"
+# padding = 10            # around the text; default 0.6 x font_size
+# border_width = 2        # drawn inside the edge
+# border_color = "#FFFFFF"
+# Idle uses color_idle, else `color`, else white.
+# color = "#FFFFFF"
+# color_idle = "#FFFFFF"
+color_typing = "#4DA3FF"
+color_verifying = "#FFD60A"
+color_failed = "#FF453A"
+# Draw nothing while idle.
+hide_idle = false
+# Reserved: hide how many characters were typed.
+hide_length = false
+
+# Text inside the indicator. The shape then fits the longest text and `radius`
+# is ignored, unless width/height are set. With shape = "none" the text is
+# always shown.
+state_text = false
+font = "sans-serif"
+font_size = 16
+text_idle = "Locked"
+text_typing = "Typing"
+text_verifying = "Verifying"
+text_failed = "Wrong password"
+# Text colors. Unset: text_color, else black or white to contrast with the
+# shape (or the state's own color for shape = "none").
+# text_color = "#FFFFFF"
+# text_color_idle = "#FFFFFF"
+# text_color_typing = "#FFFFFF"
+# text_color_verifying = "#000000"
+# text_color_failed = "#FFFFFF"
+
+
+# ---------------------------------------------------------------------------
+# The Caps Lock indicator. Takes the same shape/geometry/text keys.
+# ---------------------------------------------------------------------------
+[indicator.capslock]
+show = false
+# Draw a dimmer version while Caps Lock is off (otherwise it only appears
+# while it is on).
+show_when_off = false
+location = "top"
+shape = "rectangle"
+# 0 = size the shape to the text; else a fixed size, and the text shrinks to
+# fit.
+# radius = 20
+# width = 120
+# height = 36
+# corner_radius = 12
+# padding = 10
+# border_width = 2
+# border_color = "#FFFFFF"
+# `color` is shorthand for color_on.
+# color = "#FFB300"
+# color_on = "#FFB300"
+color_off = "#555555"
+state_text = true
+font = "sans-serif"
+font_size = 16
+text_on = "Caps Lock"
+text_off = ""
+# text_color = "#000000"
+# text_color_on = "#000000"
+# text_color_off = "#FFFFFF"
+
+
+# ---------------------------------------------------------------------------
+# The breach warning: a label that appears once `attempts` wrong passwords
+# have been entered, and stays until the screen is unlocked. Takes the same
+# shape/geometry keys as the other indicators.
+# ---------------------------------------------------------------------------
+[indicator.breach]
+show = false
+# Wrong passwords before the warning appears.
+attempts = 3
+location = "bottom"
+shape = "rectangle"
+# 0 = size the shape to the text; else a fixed size, and the text shrinks to
+# fit.
+# radius = 20
+# width = 300
+# height = 36
+# corner_radius = 12
+# padding = 10
+# border_width = 2
+# border_color = "#FFFFFF"
+color = "#FF453A"
+text = "Failed unlock attempts detected"
+font = "sans-serif"
+font_size = 16
+# text_color = "#FFFFFF"

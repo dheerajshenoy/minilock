@@ -13,11 +13,11 @@ path = "~/Downloads/9bc27292880429.5e569ff84e4d0.gif"
 smooth = true
 tint = "#FF500044" # if image is specified and loaded, this color will be used as tint color on top of the image
 
-[image.blur]
-enable = true
-radius = 4
-iterations = 3
-type = "kawase" # "box" or "gaussian" or "kawase" or "stack"
+# [image.blur]
+# enable = true
+# radius = 4
+# iterations = 3
+# type = "kawase" # "box" or "gaussian" or "kawase" or "stack"
 
 [indicator.keypress]
 # "center", "top", "bottom", "left", "right", "top-left", "top-right",

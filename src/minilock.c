@@ -54,6 +54,15 @@ static struct Config CONFIG = {
                            .color_off  = 0xFF555555, /* gray  */
                            .text_on    = "Caps Lock",
                            .text_off   = ""},
+    /* Bottom, centered, a red label that stays once triggered. */
+    .breach_indicator = {.location   = {.x = {POS_CENTER}, .y = {POS_END}},
+                         .shape      = SHAPE_RECTANGLE,
+                         .state_text = true,
+                         .text_font  = "sans-serif",
+                         .font_size  = 16,
+                         .color_failed = 0xFFFF453A, /* red */
+                         .text_failed  = "Failed unlock attempts detected"},
+    .breach_attempts  = 3,
 };
 
 static void
@@ -588,6 +597,18 @@ render_output(struct output *o)
         keypress_indicator_bounds(o->width, o->height, &CONFIG.capslock_view,
                                   &cx, &cy, &cw, &ch);
         rect_add(&dmg, cx, cy, cx + cw, cy + ch);
+    }
+    if (CONFIG.breach_indicator.show)
+    {
+        if (o->state->failed_attempts >= CONFIG.breach_attempts)
+            render_keypress_indicator(b->cairo_surface, o->width, o->height,
+                                      &CONFIG.breach_indicator,
+                                      KEYPRESS_INDICATOR_STATE_FAILED);
+
+        int bx, by, bw, bh;
+        keypress_indicator_bounds(o->width, o->height, &CONFIG.breach_indicator,
+                                  &bx, &by, &bw, &bh);
+        rect_add(&dmg, bx, by, bx + bw, by + bh);
     }
     o->indicator_dirty = false;
 
@@ -1133,6 +1154,30 @@ parse_config(void)
         {"indicator.capslock.text_color_off", K_COLOR,
          &CONFIG.capslock_indicator.text_color_off},
 
+        {"indicator.breach.show", K_BOOL, &CONFIG.breach_indicator.show},
+        {"indicator.breach.attempts", K_POS, &CONFIG.breach_attempts},
+        {"indicator.breach.location", K_LOCATION,
+         &CONFIG.breach_indicator.location},
+        {"indicator.breach.shape", K_SHAPE, &CONFIG.breach_indicator.shape},
+        {"indicator.breach.radius", K_POS, &CONFIG.breach_indicator.radius},
+        {"indicator.breach.width", K_POS, &CONFIG.breach_indicator.width},
+        {"indicator.breach.height", K_POS, &CONFIG.breach_indicator.height},
+        {"indicator.breach.corner_radius", K_POS,
+         &CONFIG.breach_indicator.corner_radius},
+        {"indicator.breach.padding", K_POS, &CONFIG.breach_indicator.padding},
+        {"indicator.breach.border_width", K_POS,
+         &CONFIG.breach_indicator.border_width},
+        {"indicator.breach.border_color", K_COLOR,
+         &CONFIG.breach_indicator.border_color},
+        {"indicator.breach.color", K_COLOR,
+         &CONFIG.breach_indicator.color_failed},
+        {"indicator.breach.font", K_STRING, &CONFIG.breach_indicator.text_font},
+        {"indicator.breach.font_size", K_POS,
+         &CONFIG.breach_indicator.font_size},
+        {"indicator.breach.text", K_STRING,
+         &CONFIG.breach_indicator.text_failed},
+        {"indicator.breach.text_color", K_COLOR,
+         &CONFIG.breach_indicator.text_color},
         {"indicator.keypress.show", K_BOOL, &CONFIG.keypress_indicator.show},
         {"indicator.keypress.color", K_COLOR, &CONFIG.keypress_indicator.color},
         {"indicator.keypress.color_idle", K_COLOR,
@@ -1339,6 +1384,16 @@ finish_config(void)
         if (ki->color && !ki->text_color)
             ki->text_color = ki->color;
     }
+
+    /* The breach warning is a text label: all four texts the same, so the
+     * shape is sized to it. */
+    struct KeypressIndicatorConfig *br = &CONFIG.breach_indicator;
+    br->text_idle = br->text_typing = br->text_verifying = br->text_failed;
+    br->fixed_size                  = br->radius > 0;
+    if (!br->radius)
+        br->radius = 14;
+    br->state_text                  = true;
+    br->color_idle = br->color_typing = br->color_verifying = br->color_failed;
 
     /* The caps lock indicator is drawn by the keypress indicator's code, so
      * describe it in that vocabulary: off is "idle", on is "typing" (the other
@@ -1636,6 +1691,10 @@ minilock_init(int argc, char *argv[])
                 else
                 {
                     fprintf(stderr, "Wrong password\n");
+                    state.failed_attempts++;
+                    if (CONFIG.breach_indicator.show
+                        && state.failed_attempts == CONFIG.breach_attempts)
+                        indicators_redraw(&state);
                     indicator_set(&state, KEYPRESS_INDICATOR_STATE_FAILED);
                     if (state.indicator_tfd >= 0)
                         arm_timer(state.indicator_tfd, FAILED_FLASH_MS);
